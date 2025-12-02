@@ -1,11 +1,12 @@
 /**
  * app/components/modules/ConversationList.tsx
- *
- * Module 2: Cột danh sách hội thoại
+ * [UPDATED] Thêm Bot Selector Dropdown.
  */
-import { ThreadInfo } from "@/lib/types/zalo.types";
+import { ThreadInfo, UserCacheEntry } from "@/lib/types/zalo.types";
+import { ZaloBot } from "@/lib/types/database.types";
 import { Avatar } from "@/app/components/ui/Avatar";
 import { IconSearch } from "@/app/components/ui/Icons";
+import { BotSelector } from "./BotSelector";
 
 export function ConversationList({
   threads,
@@ -15,6 +16,10 @@ export function ConversationList({
   onSearchChange,
   onFetchThreads,
   isLoadingThreads,
+  // Props mới cho Multi-bot
+  bots,
+  activeBotId,
+  onSwitchBot,
 }: {
   threads: ThreadInfo[];
   selectedThread: ThreadInfo | null;
@@ -23,103 +28,110 @@ export function ConversationList({
   onSearchChange: (term: string) => void;
   onFetchThreads: () => void;
   isLoadingThreads: boolean;
+  bots: ZaloBot[];
+  activeBotId: string | null;
+  onSwitchBot: (botId: string) => void;
 }) {
   return (
-    <div className="flex h-full w-80 flex-col border-r border-gray-700 bg-gray-800">
-      {/* Header và Thanh tìm kiếm */}
-      <div className="p-4">
-        <h2 className="mb-4 text-2xl font-bold text-white">Chats</h2>
+    <div className="flex h-full flex-col border-r border-gray-700 bg-gray-800">
+      {/* 1. Bot Selector (Dropdown) */}
+      <BotSelector
+        bots={bots}
+        selectedBotId={activeBotId}
+        onSelectBot={onSwitchBot}
+      />
+
+      {/* 2. Header & Search */}
+      <div className="px-4 pb-4 border-b border-gray-700">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xl font-bold text-white">Hội thoại</h2>
+          <button
+            onClick={onFetchThreads}
+            disabled={isLoadingThreads || !activeBotId}
+            className="p-1.5 rounded-md hover:bg-gray-700 text-gray-400 transition-colors"
+            title="Làm mới danh sách"
+          >
+            <svg
+              className={`w-5 h-5 ${isLoadingThreads ? "animate-spin" : ""}`}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+          </button>
+        </div>
+
         <div className="relative">
           <input
             type="text"
-            placeholder="Tìm kiếm bạn bè, nhóm..."
+            placeholder="Tìm kiếm..."
             value={searchTerm}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full rounded-lg border border-gray-600 bg-gray-700 py-2 pl-10 pr-4 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full rounded-lg border border-gray-600 bg-gray-900/50 py-2 pl-9 pr-4 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-500"
           />
-          <IconSearch className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-400" />
+          <IconSearch className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
         </div>
       </div>
 
-      {/* Nút Tải lại */}
-      <button
-        type="button"
-        onClick={onFetchThreads}
-        disabled={isLoadingThreads}
-        className="mx-4 mb-2 flex items-center justify-center gap-2 rounded-lg bg-gray-600 p-2 text-sm text-white transition duration-200 hover:bg-gray-500 disabled:cursor-wait disabled:opacity-50"
-      >
-        {isLoadingThreads ? (
-          <svg
-            className="h-5 w-5 animate-spin"
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-          >
-            <circle
-              className="opacity-25"
-              cx="12"
-              cy="12"
-              r="10"
-              stroke="currentColor"
-              strokeWidth="4"
-            ></circle>
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            ></path>
-          </svg>
+      {/* 3. Thread List */}
+      <div className="flex-1 overflow-y-auto scrollbar-thin">
+        {!activeBotId ? (
+          <div className="flex flex-col items-center justify-center h-40 text-gray-500 px-6 text-center">
+            <p className="text-sm">
+              Vui lòng chọn một tài khoản Bot để xem tin nhắn.
+            </p>
+          </div>
+        ) : threads.length === 0 && !isLoadingThreads ? (
+          <div className="p-4 text-center text-gray-500 text-sm">
+            Chưa có hội thoại nào.
+          </div>
         ) : (
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={1.5}
-            stroke="currentColor"
-            className="h-5 w-5"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
-            />
-          </svg>
+          threads.map((thread) => (
+            <button
+              key={thread.id}
+              onClick={() => onSelectThread(thread)}
+              className={`flex w-full items-center gap-3 p-3 text-left transition-colors border-l-4 ${
+                selectedThread?.id === thread.id
+                  ? "bg-gray-700/50 border-blue-500"
+                  : "border-transparent hover:bg-gray-700/30"
+              }`}
+            >
+              <Avatar
+                src={thread.avatar}
+                alt={thread.name}
+                isGroup={thread.type === 1}
+              />
+              <div className="flex-1 overflow-hidden">
+                <div className="flex justify-between items-center mb-0.5">
+                  <h3 className="truncate font-medium text-white text-sm">
+                    {thread.name}
+                  </h3>
+                  {/* Có thể thêm time ở đây */}
+                </div>
+                <p className="truncate text-xs text-gray-400 flex items-center gap-1">
+                  {thread.type === 1 && (
+                    <span className="bg-gray-700 px-1 rounded text-[10px]">
+                      GROUP
+                    </span>
+                  )}
+                  <span>Tin nhắn mới...</span>
+                </p>
+              </div>
+            </button>
+          ))
         )}
-        {isLoadingThreads ? "Đang tải..." : "Tải lại danh sách"}
-      </button>
 
-      {/* Danh sách Hội thoại */}
-      <div className="flex-1 overflow-y-auto">
-        {threads.length === 0 && !isLoadingThreads && (
-          <p className="p-4 text-center text-gray-500">
-            Không tìm thấy hội thoại.
-          </p>
+        {isLoadingThreads && (
+          <div className="p-4 flex justify-center">
+            <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+          </div>
         )}
-        {threads.map((thread) => (
-          <button
-            key={thread.id}
-            onClick={() => onSelectThread(thread)}
-            className={`flex w-full items-center gap-3 p-4 text-left transition-colors ${
-              selectedThread?.id === thread.id
-                ? "bg-blue-800"
-                : "hover:bg-gray-700"
-            }`}
-          >
-            <Avatar
-              src={thread.avatar}
-              alt={thread.name}
-              isGroup={thread.type === 1}
-            />
-            <div className="flex-1 overflow-hidden">
-              <h3 className="truncate font-semibold text-white">
-                {thread.name}
-              </h3>
-              <p className="truncate text-sm text-gray-400">
-                {thread.type === 1 ? "Nhóm" : "Bạn bè"}
-              </p>
-            </div>
-          </button>
-        ))}
       </div>
     </div>
   );

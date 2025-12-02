@@ -1,20 +1,29 @@
 /**
  * app/api/system-setup/route.ts
- * Endpoint đặc biệt để khởi tạo tài khoản Admin đầu tiên.
- * Cần bảo mật endpoint này sau khi deploy (hoặc xóa đi).
+ * Endpoint khởi tạo tài khoản Admin đầu tiên cho hệ thống ZaloLite CRM.
+ * Logic: Tạo record trong bảng `staff_accounts`.
+ * Warning: Hãy xóa hoặc bảo vệ endpoint này sau khi deploy production.
  */
 import { NextRequest, NextResponse } from "next/server";
-import { createProfile } from "@/lib/models/profile.model";
-import {
-  createSystemAccount,
-  getAccountByUsername,
-} from "@/lib/models/system-auth.model";
+import supabase from "@/lib/supabaseClient";
 import { hashPassword } from "@/lib/utils/security";
 
 export async function GET(request: NextRequest) {
   try {
-    // 1. Kiểm tra xem đã có admin nào chưa (tránh bị reset)
-    const existingAdmin = await getAccountByUsername("admin");
+    console.log("[System Setup] Đang kiểm tra tài khoản Admin...");
+
+    // 1. Kiểm tra xem đã có admin nào chưa
+    const { data: existingAdmin, error: checkError } = await supabase
+      .from("staff_accounts")
+      .select("id")
+      .eq("username", "admin")
+      .single();
+
+    if (checkError && checkError.code !== "PGRST116") {
+      // PGRST116: No rows found -> Là trạng thái tốt để tạo mới
+      throw new Error("Lỗi kiểm tra DB: " + checkError.message);
+    }
+
     if (existingAdmin) {
       return NextResponse.json(
         { error: "Hệ thống đã có tài khoản Admin. Không thể khởi tạo lại." },
@@ -22,28 +31,28 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // 2. Tạo Profile gốc
-    const profile = await createProfile({
-      zalo_uid: "system_admin_01", // Fake UID
-      display_name: "System Administrator",
-      email: "admin@parentonline.com",
-      status: "active",
-      zalo_name: "Admin",
-    });
+    // 2. Tạo password hash
+    // Mật khẩu mặc định: admin123
+    const passwordHash = hashPassword("admin123");
 
-    // 3. Mã hóa mật khẩu mặc định
-    // Mật khẩu mặc định là: admin123 (Bạn nên đổi ngay sau khi login)
-    const { hash, salt } = hashPassword("admin123");
+    // 3. Insert Admin vào bảng staff_accounts
+    const { data: newAdmin, error: createError } = await supabase
+      .from("staff_accounts")
+      .insert({
+        username: "admin",
+        password_hash: passwordHash,
+        full_name: "Super Administrator",
+        role: "admin",
+        is_active: true,
+      })
+      .select()
+      .single();
 
-    // 4. Tạo System Account
-    const account = await createSystemAccount({
-      profile_id: profile.id,
-      username: "admin",
-      password_hash: hash,
-      salt: salt,
-      role: "admin", // Full quyền
-      is_active: true,
-    });
+    if (createError) {
+      throw new Error("Lỗi tạo Admin: " + createError.message);
+    }
+
+    console.log("[System Setup] Khởi tạo thành công:", newAdmin.id);
 
     return NextResponse.json({
       success: true,
@@ -52,16 +61,16 @@ export async function GET(request: NextRequest) {
         username: "admin",
         password: "admin123",
       },
-      account_id: account.id,
+      staff_id: newAdmin.id,
     });
-  } catch (error: unknown) {
-    // SỬA LỖI: Thay 'any' bằng 'unknown' và kiểm tra kiểu dữ liệu an toàn
-    const errorMessage =
-      error instanceof Error ? error.message : "Lỗi không xác định";
-
+  } catch (error: any) {
+    console.error("[System Setup] Error:", error);
     return NextResponse.json(
-      { success: false, error: errorMessage },
+      { success: false, error: error.message || "Lỗi không xác định" },
       { status: 500 },
     );
   }
 }
+
+// Luôn chạy động để không bị cache kết quả cũ
+export const dynamic = "force-dynamic";

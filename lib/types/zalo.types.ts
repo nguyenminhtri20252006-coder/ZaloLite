@@ -265,7 +265,7 @@ export enum ThreadType {
 }
 
 export type LoginState = "IDLE" | "LOGGING_IN" | "LOGGED_IN" | "ERROR";
-export type ViewState = "chat" | "manage";
+export type ViewState = "chat" | "manage" | "setting";
 
 // --- 6. EXPORTS & STANDARD TYPES ---
 

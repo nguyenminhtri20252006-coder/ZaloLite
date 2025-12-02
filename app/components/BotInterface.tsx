@@ -1,37 +1,30 @@
 "use client";
 
-/**
- * app/components/BotInterface.tsx
- * [UX UPGRADE]
- * - Thêm tính năng Resizable Sidebar (Kéo thả).
- * - Cải thiện layout tổng thể.
- */
-import { ChangeEvent, useState, useRef, useEffect, useMemo } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
-  AccountInfo,
   ThreadInfo,
   ZaloMessage,
   ViewState,
   UserCacheEntry,
 } from "@/lib/types/zalo.types";
+import { ZaloBot } from "@/lib/types/database.types"; // Import type Bot
 import { MainMenu } from "@/app/components/modules/MainMenu";
 import { ConversationList } from "@/app/components/modules/ConversationList";
 import { ChatFrame } from "@/app/components/modules/ChatFrame";
 import { DetailsPanel } from "@/app/components/modules/DetailsPanel";
-import { ManagementPanel } from "@/app/components/modules/ManagementPanel";
+import { BotLoginManager } from "@/app/components/modules/BotLoginManager"; // Import Component Mới
+import {
+  getBotsAction,
+  createBotAction,
+  deleteBotAction,
+  startBotLoginAction,
+} from "@/lib/actions/bot.actions";
+import { getThreadsAction } from "@/lib/actions/chat.actions";
+import { ZALO_EVENTS } from "@/lib/event-emitter";
+import { IconCog } from "@/app/components/ui/Icons";
 
-// Định nghĩa Props (Giữ nguyên)
 type BotInterfaceProps = {
-  accountInfo: AccountInfo | null;
-  onCopyToken: () => void;
-  isCopying: boolean;
-  isExpanded: boolean;
-  onToggleMenu: () => void;
-  onLogout: () => void;
-  onFetchAccountInfo: () => void;
-  isLoadingAccountInfo: boolean;
-  currentView: ViewState;
-  onChangeView: (view: ViewState) => void;
+  staffInfo: { name: string; role: string; username: string } | null;
   filteredThreads: ThreadInfo[];
   selectedThread: ThreadInfo | null;
   onSelectThread: (thread: ThreadInfo) => void;
@@ -43,7 +36,7 @@ type BotInterfaceProps = {
   messages: ZaloMessage[];
   onSendMessage: (content: string) => Promise<void>;
   isEchoBotEnabled: boolean;
-  onToggleEchoBot: (e: ChangeEvent<HTMLInputElement>) => void;
+  onToggleEchoBot: (e: any) => void;
   onSendVocabulary: (topic: string, type: 0 | 1) => Promise<void>;
   isSendingMessage: boolean;
   isSendingVocab: boolean;
@@ -56,7 +49,6 @@ type BotInterfaceProps = {
   errorMessage: string | null;
   onClearError: () => void;
   onSetError: (message: string | null) => void;
-  // THÊM MỚI (Lô Cache): Props cho User Cache
   userCache: Record<string, UserCacheEntry>;
   onStartManualScan: () => void;
   isScanningAll: boolean;
@@ -64,28 +56,7 @@ type BotInterfaceProps = {
 };
 
 export function BotInterface({
-  // Tách props ra
-  accountInfo,
-  onCopyToken,
-  isCopying,
-  isExpanded,
-  onToggleMenu,
-  onLogout,
-  onFetchAccountInfo,
-  isLoadingAccountInfo,
-  // THÊM MỚI: Props cho Tabs (View)
-  currentView,
-  onChangeView,
-  // Props cho Module 2
-  filteredThreads,
-  selectedThread,
-  onSelectThread,
-  searchTerm,
-  onSearchChange,
-  onFetchThreads,
-  isLoadingThreads,
-  thread,
-  messages,
+  staffInfo,
   onSendMessage,
   isEchoBotEnabled,
   onToggleEchoBot,
@@ -95,205 +66,270 @@ export function BotInterface({
   threadForDetails,
   isDetailsPanelOpen,
   onToggleDetails,
-  onRefreshThreads,
-  onClearSelectedThread,
-  threads,
-  errorMessage,
-  onClearError,
   onSetError,
   userCache,
-  onStartManualScan,
-  isScanningAll,
-  scanStatus,
 }: BotInterfaceProps) {
-  // --- RESIZABLE LOGIC ---
+  // --- GLOBAL STATE ---
+  const [currentView, setCurrentView] = useState<ViewState>("chat");
+  const [bots, setBots] = useState<ZaloBot[]>([]);
 
-  // State độ rộng
-  const [menuWidth, setMenuWidth] = useState(260); // Menu trái
-  const [detailsWidth, setDetailsWidth] = useState(400); // Details phải (Mặc định 320px)
+  // --- CHAT STATE ---
+  const [activeBotIdForChat, setActiveBotIdForChat] = useState<string | null>(
+    null,
+  );
+  const [threads, setThreads] = useState<ThreadInfo[]>([]);
+  const [selectedThread, setSelectedThread] = useState<ThreadInfo | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [isLoadingThreads, setIsLoadingThreads] = useState(false);
 
-  // State điều khiển kéo thả: null | 'MENU' | 'DETAILS'
+  // State Login Flow
+  const [activeQrBotId, setActiveQrBotId] = useState<string | null>(null);
+  const [qrCodeData, setQrCodeData] = useState<string | null>(null);
+
+  // --- RESIZE STATE ---
+  const [menuWidth, setMenuWidth] = useState(240); // Menu trái
+  const [convListWidth, setConvListWidth] = useState(300); // List hội thoại
+  const [isMenuExpanded, setIsMenuExpanded] = useState(true);
   const [resizingTarget, setResizingTarget] = useState<
-    "MENU" | "DETAILS" | null
+    "MENU" | "CONV_LIST" | null
   >(null);
-
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Derived State cho Menu trái
-  const actualMenuWidth = isExpanded ? menuWidth : 64;
+  // --- SSE & DATA FETCHING ---
+  const eventSourceRef = useRef<EventSource | null>(null);
 
-  // Handlers bắt đầu kéo
-  const startResizingMenu = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setResizingTarget("MENU");
-  };
-
-  const startResizingDetails = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setResizingTarget("DETAILS");
-  };
-
-  const stopResizing = () => {
-    setResizingTarget(null);
-  };
-
-  const resize = (e: MouseEvent) => {
-    if (!resizingTarget || !containerRef.current) return;
-
-    const containerRect = containerRef.current.getBoundingClientRect();
-
-    if (resizingTarget === "MENU") {
-      // Logic kéo Menu Trái (Tăng khi kéo sang phải)
-      const newWidth = e.clientX - containerRect.left;
-      if (newWidth > 60 && newWidth < 500) {
-        setMenuWidth(newWidth);
-        // Tự động toggle trạng thái mở rộng
-        if (newWidth < 100 && isExpanded) onToggleMenu();
-        else if (newWidth > 100 && !isExpanded) onToggleMenu();
+  const fetchBots = async () => {
+    try {
+      const data = await getBotsAction();
+      setBots(data);
+      // Nếu chưa chọn bot chat nào, auto chọn bot đầu tiên active
+      if (!activeBotIdForChat && data.length > 0) {
+        const active = data.find((b) => b.status?.state === "LOGGED_IN");
+        if (active) setActiveBotIdForChat(active.id);
       }
-    } else if (resizingTarget === "DETAILS") {
-      // Logic kéo Details Phải (Tăng khi kéo sang trái)
-      // Width = RightEdge - MouseX
-      const newWidth = containerRect.right - e.clientX;
-      // Giới hạn min 250px, max 600px
-      if (newWidth > 250 && newWidth < 600) {
-        setDetailsWidth(newWidth);
-      }
+    } catch (e) {
+      console.error("Fetch Bots Failed:", e);
     }
   };
 
   useEffect(() => {
+    fetchBots();
+    // Setup SSE (Realtime Status)
+    const es = new EventSource("/api/zalo-events");
+    es.addEventListener(ZALO_EVENTS.QR_GENERATED, (e) => {
+      const p = JSON.parse(e.data);
+      if (p.botId === activeQrBotId) setQrCodeData(p.qrCode);
+      updateBotStatusLocal(p.botId, "QR_WAITING");
+    });
+    es.addEventListener(ZALO_EVENTS.STATUS_UPDATE, (e) => {
+      const p = JSON.parse(e.data);
+      updateBotStatusLocal(p.botId, p.status.state, p.status.error_message);
+      if (p.status.state === "LOGGED_IN") fetchBots();
+    });
+    return () => es.close();
+  }, [activeQrBotId]);
+
+  const updateBotStatusLocal = (botId: string, state: any, error?: string) => {
+    setBots((prev) =>
+      prev.map((b) =>
+        b.id === botId
+          ? { ...b, status: { ...b.status, state, error_message: error } }
+          : b,
+      ),
+    );
+  };
+
+  // --- DATA FETCHING (THREADS) ---
+  const fetchThreads = async (botId: string) => {
+    if (!botId) return;
+    setIsLoadingThreads(true);
+    try {
+      const data = await getThreadsAction(botId);
+      setThreads(data);
+    } catch (e) {
+      console.error("Fetch Threads Error:", e);
+    } finally {
+      setIsLoadingThreads(false);
+    }
+  };
+
+  // Trigger fetch when switching bot in chat
+  useEffect(() => {
+    if (activeBotIdForChat) {
+      fetchThreads(activeBotIdForChat);
+      setSelectedThread(null); // Clear selected thread when switching bot
+    }
+  }, [activeBotIdForChat]);
+
+  // --- HANDLERS ---
+  const handleSwitchBot = (botId: string) => setActiveBotIdForChat(botId);
+  const handleCreateBot = async (name: string) => {
+    await createBotAction(name);
+    fetchBots();
+  };
+  const handleDeleteBot = async (id: string) => {
+    await deleteBotAction(id);
+    fetchBots();
+  };
+  const handleStartLogin = async (id: string) => {
+    setActiveQrBotId(id);
+    setQrCodeData(null);
+    updateBotStatusLocal(id, "QR_WAITING");
+    try {
+      await startBotLoginAction(id);
+    } catch (e) {
+      alert(e);
+    }
+  };
+
+  // --- RESIZE HANDLERS ---
+  const startResizing = (t: "MENU" | "CONV_LIST") => (e: React.MouseEvent) => {
+    e.preventDefault();
+    setResizingTarget(t);
+  };
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!resizingTarget || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (resizingTarget === "MENU") {
+        const w = e.clientX - rect.left;
+        if (w > 60 && w < 400) setMenuWidth(w);
+      } else if (resizingTarget === "CONV_LIST") {
+        const menuW = isMenuExpanded ? menuWidth : 64;
+        const w = e.clientX - rect.left - menuW;
+        if (w > 200 && w < 500) setConvListWidth(w);
+      }
+    };
+    const handleMouseUp = () => setResizingTarget(null);
     if (resizingTarget) {
-      window.addEventListener("mousemove", resize);
-      window.addEventListener("mouseup", stopResizing);
+      window.addEventListener("mousemove", handleMouseMove);
+      window.addEventListener("mouseup", handleMouseUp);
     }
     return () => {
-      window.removeEventListener("mousemove", resize);
-      window.removeEventListener("mouseup", stopResizing);
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [resizingTarget, isExpanded]);
+  }, [resizingTarget, isMenuExpanded, menuWidth]);
+
+  // Filter threads
+  const filteredThreads = threads.filter((t) =>
+    t.name.toLowerCase().includes(searchTerm.toLowerCase()),
+  );
 
   return (
     <div
       className="flex h-screen w-full overflow-hidden bg-gray-900 font-sans text-gray-100"
       ref={containerRef}
     >
-      {/* --- MODULE 1: LEFT SIDEBAR (RESIZABLE) --- */}
-      <div className="flex h-full flex-shrink-0 relative group z-30">
+      {/* COLUMN 1: MAIN MENU (Resizable) */}
+      <div
+        className="flex h-full flex-shrink-0 relative z-50 shadow-xl bg-gray-900"
+        style={{ width: isMenuExpanded ? menuWidth : 64 }}
+      >
         <MainMenu
-          accountInfo={accountInfo}
-          onCopyToken={onCopyToken}
-          isCopying={isCopying}
-          isExpanded={isExpanded}
-          onToggleMenu={onToggleMenu}
-          onLogout={onLogout}
-          onFetchAccountInfo={onFetchAccountInfo}
-          isLoadingAccountInfo={isLoadingAccountInfo}
+          staffInfo={staffInfo}
+          isExpanded={isMenuExpanded}
+          onToggleMenu={() => setIsMenuExpanded(!isMenuExpanded)}
           currentView={currentView}
-          onChangeView={onChangeView}
-          customWidth={actualMenuWidth}
+          onChangeView={setCurrentView}
+          customWidth={isMenuExpanded ? menuWidth : 64}
         />
-        {/* Drag Handle Left */}
         <div
-          className={`w-1.5 h-full cursor-col-resize absolute right-[-3px] top-0 z-[100] transition-colors duration-200 
-            ${
-              resizingTarget === "MENU"
-                ? "bg-blue-500"
-                : "bg-transparent hover:bg-blue-500/50"
-            }`}
-          onMouseDown={startResizingMenu}
-          title="Kéo để chỉnh kích thước Menu"
+          className="w-1 h-full cursor-col-resize absolute right-0 top-0 hover:bg-blue-500/50 transition-colors z-[60]"
+          onMouseDown={startResizing("MENU")}
         />
       </div>
 
-      {/* --- MAIN CONTENT AREA --- */}
-      <div className="flex flex-1 overflow-hidden bg-gray-800 relative">
-        {currentView === "chat" ? (
-          <>
-            {/* Module 2: Conversation List (Fixed width for now, or flexible if needed) */}
-            <ConversationList
-              threads={filteredThreads}
-              selectedThread={selectedThread}
-              onSelectThread={onSelectThread}
-              searchTerm={searchTerm}
-              onSearchChange={onSearchChange}
-              onFetchThreads={onFetchThreads}
-              isLoadingThreads={isLoadingThreads}
-            />
-
-            {/* Module 3: Main Chat Frame */}
-            <ChatFrame
-              thread={selectedThread}
-              messages={messages}
-              onSendMessage={onSendMessage}
-              onToggleDetails={onToggleDetails}
-              isEchoBotEnabled={isEchoBotEnabled}
-              onToggleEchoBot={onToggleEchoBot}
-              onSendVocabulary={onSendVocabulary}
-              isSendingMessage={isSendingMessage}
-              isSendingVocab={isSendingVocab}
-              onSetError={onSetError}
-              userCache={userCache}
-            />
-
-            {/* Module 4: Details Panel (Conditional) */}
-            {isDetailsPanelOpen && (
-              <div className="flex h-full flex-shrink-0 relative z-20">
-                {/* Drag Handle Right (Nằm bên trái của panel này) */}
-                <div
-                  className={`w-1.5 h-full cursor-col-resize absolute left-[-3px] top-0 z-[100] transition-colors duration-200 
-                    ${
-                      resizingTarget === "DETAILS"
-                        ? "bg-blue-500"
-                        : "bg-transparent hover:bg-blue-500/50"
-                    }`}
-                  onMouseDown={startResizingDetails}
-                  title="Kéo để chỉnh kích thước Panel Chi tiết"
-                />
-
-                <DetailsPanel
-                  thread={threadForDetails}
-                  onClose={() => onToggleDetails()}
-                  onRefreshThreads={onRefreshThreads}
-                  onClearSelectedThread={onClearSelectedThread}
-                  threads={threads}
-                  customWidth={detailsWidth} // [NEW]
-                />
-              </div>
-            )}
-          </>
-        ) : (
-          // Chế độ Quản lý
-          <div className="flex-1 h-full overflow-hidden">
-            <ManagementPanel
-              selectedThread={selectedThread}
-              threads={threads}
-              onRefreshThreads={onRefreshThreads}
-              userCache={userCache}
-              onStartManualScan={onStartManualScan}
-              isScanningAll={isScanningAll}
-              scanStatus={scanStatus}
-            />
-          </div>
+      {/* CONTENT AREA */}
+      <div className="flex-1 flex overflow-hidden relative bg-gray-800">
+        {/* VIEW: LOGIN */}
+        {currentView === "manage" && (
+          <BotLoginManager
+            bots={bots}
+            isLoading={false}
+            onRefresh={fetchBots}
+            onCreateBot={handleCreateBot}
+            onDeleteBot={handleDeleteBot}
+            onStartLoginQR={handleStartLogin}
+            activeQrBotId={activeQrBotId}
+            qrCodeData={qrCodeData}
+          />
         )}
 
-        {/* Hiển thị lỗi (nếu có) */}
-        {errorMessage && (
-          <div className="absolute bottom-4 right-4 z-50 max-w-sm rounded-lg bg-red-900/90 border border-red-700 p-4 text-red-100 shadow-2xl animate-fade-in-up backdrop-blur-sm">
-            <div className="flex justify-between items-start gap-3">
-              <div className="flex-1">
-                <strong className="block font-bold mb-1 text-red-300">
-                  Lỗi:
-                </strong>
-                <span className="text-sm">{errorMessage}</span>
-              </div>
-              <button
-                onClick={onClearError}
-                className="flex-shrink-0 -mt-1 -mr-1 p-1 hover:bg-red-800 rounded-full"
-              >
-                &times;
-              </button>
+        {/* VIEW: CHAT */}
+        {currentView === "chat" && (
+          <>
+            {/* Sidebar Conversation List (Resizable) */}
+            <div
+              className="flex-shrink-0 h-full relative border-r border-gray-700 bg-gray-800 z-40"
+              style={{ width: convListWidth }}
+            >
+              <ConversationList
+                threads={filteredThreads}
+                selectedThread={selectedThread}
+                onSelectThread={setSelectedThread}
+                searchTerm={searchTerm}
+                onSearchChange={setSearchTerm}
+                onFetchThreads={() =>
+                  activeBotIdForChat && fetchThreads(activeBotIdForChat)
+                }
+                isLoadingThreads={isLoadingThreads}
+                bots={bots}
+                activeBotId={activeBotIdForChat}
+                onSwitchBot={handleSwitchBot}
+              />
+              <div
+                className="w-1 h-full cursor-col-resize absolute right-0 top-0 hover:bg-blue-500/50 transition-colors z-[50]"
+                onMouseDown={startResizing("CONV_LIST")}
+              />
             </div>
+
+            {/* COLUMN 3: CHAT FRAME (Fluid) */}
+            <div className="flex-1 flex min-w-0">
+              <ChatFrame
+                thread={selectedThread}
+                messages={[]} // TODO: Cần logic fetch message theo botId & threadId
+                onSendMessage={async (content) => {
+                  if (activeBotIdForChat && selectedThread) {
+                    // Gọi action send message mới với botId
+                    // await sendMessageAction(activeBotIdForChat, content, selectedThread.id, selectedThread.type);
+                  }
+                }}
+                onToggleDetails={onToggleDetails}
+                isEchoBotEnabled={isEchoBotEnabled}
+                onToggleEchoBot={onToggleEchoBot}
+                onSendVocabulary={onSendVocabulary}
+                isSendingMessage={isSendingMessage}
+                isSendingVocab={isSendingVocab}
+                onSetError={onSetError}
+                userCache={userCache}
+              />
+
+              {/* Details Sidebar (Optional) */}
+              {isDetailsPanelOpen && (
+                <DetailsPanel
+                  botId={activeBotIdForChat}
+                  thread={selectedThread}
+                  onClose={onToggleDetails}
+                  onRefreshThreads={() =>
+                    activeBotIdForChat && fetchThreads(activeBotIdForChat)
+                  }
+                  onClearSelectedThread={() => setSelectedThread(null)}
+                  threads={threads}
+                />
+              )}
+            </div>
+          </>
+        )}
+
+        {/* VIEW: SETTING */}
+        {currentView === "setting" && (
+          <div className="flex-1 flex flex-col items-center justify-center text-gray-500 bg-gray-900">
+            <IconCog className="w-20 h-20 mb-4 opacity-20" />
+            <h2 className="text-xl font-bold text-gray-400">
+              Cài đặt Hệ thống
+            </h2>
+            <p>Tính năng đang phát triển...</p>
           </div>
         )}
       </div>

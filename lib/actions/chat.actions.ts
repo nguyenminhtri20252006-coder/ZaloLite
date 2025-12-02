@@ -1,137 +1,131 @@
 "use server";
 
-import { ZaloSingletonService } from "@/lib/runtime-service";
-// SỬA ĐỔI: Import các type mới từ SSOT
-import {
-  AccountInfo,
-  ThreadInfo,
-  MessageContent,
-  ThreadType,
-  SendVoiceOptions,
-  SendVideoOptions,
-  SendLinkOptions,
-} from "@/lib/types/zalo.types";
+/**
+ * lib/actions/chat.actions.ts
+ * [REFACTORED] Hỗ trợ Multi-Bot thông qua BotRuntimeManager.
+ */
+
+import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
+import { ThreadInfo, ThreadType, MessageContent } from "@/lib/types/zalo.types";
 
 /**
- * Gửi một tin nhắn
- * THAY ĐỔI: Thêm tham số 'type' (0 hoặc 1)
+ * Helper: Lấy API của Bot và xử lý lỗi chung
+ */
+function getBotAPI(botId: string) {
+  try {
+    return BotRuntimeManager.getInstance().getBotAPI(botId);
+  } catch (e: any) {
+    throw new Error(`Lỗi Bot (${botId}): ${e.message}`);
+  }
+}
+
+/**
+ * Lấy danh sách hội thoại của Bot
+ */
+export async function getThreadsAction(botId: string): Promise<ThreadInfo[]> {
+  if (!botId) return [];
+
+  try {
+    const api = getBotAPI(botId);
+
+    // Gọi song song lấy bạn bè và nhóm
+    const [friends, rawGroupsData] = await Promise.all([
+      api.getAllFriends(),
+      api.getAllGroups(),
+    ]);
+
+    // Map Bạn bè
+    const friendThreads: ThreadInfo[] = friends.map((u: any) => ({
+      id: u.userId,
+      name: u.displayName || u.zaloName || "Unknown",
+      avatar: u.avatar,
+      type: 0, // User
+    }));
+
+    // Map Nhóm
+    // Lưu ý: zca-js trả về gridVerMap hoặc gridInfoMap tùy version
+    // Ở đây ta giả định lấy ID và map đơn giản. Nếu cần tên nhóm chính xác,
+    // cần gọi getGroupInfo cho từng nhóm (hoặc batch).
+    // Để tối ưu tốc độ list, ta tạm lấy ID làm tên nếu chưa có cache.
+    const groupIds = Object.keys(rawGroupsData.gridVerMap || {});
+
+    // Tối ưu: Chỉ lấy Group ID trước, UI sẽ fetch detail sau hoặc cache
+    // Tuy nhiên để demo chạy được, ta trả về danh sách ID
+    const groupThreads: ThreadInfo[] = groupIds.map((gid) => ({
+      id: gid,
+      name: `Group ${gid.slice(0, 6)}...`, // Placeholder
+      avatar: "",
+      type: 1, // Group
+    }));
+
+    // TODO: Implement batch getGroupInfo here for better UX
+
+    return [...friendThreads, ...groupThreads];
+  } catch (error: any) {
+    console.error("[ChatAction] getThreads Error:", error);
+    return [];
+  }
+}
+
+/**
+ * Gửi tin nhắn
  */
 export async function sendMessageAction(
-  message: string | MessageContent,
+  botId: string,
+  content: string | MessageContent,
   threadId: string,
   type: ThreadType,
 ) {
-  if (!message || !threadId) {
-    return { success: false, error: "Thiếu message hoặc threadId" };
-  }
-
   try {
-    // Gọi service để gửi tin
-    const result = await ZaloSingletonService.getInstance().sendMessage(
-      message,
+    const api = getBotAPI(botId);
+
+    // Gọi hàm sendMessage của zca-js
+    const result = await api.sendMessage(
+      content,
       threadId,
-      type,
+      type === ThreadType.Group ? 1 : 0,
     );
 
-    // Trả về success: true kèm dữ liệu gốc (nếu cần)
     return { success: true, data: result };
-  } catch (error: unknown) {
-    console.error("[Action Error] sendMessageAction:", error);
-    const errorMessage =
-      error instanceof Error
-        ? error.message
-        : "Lỗi gửi tin nhắn không xác định";
-    return { success: false, error: errorMessage };
-  }
-}
-
-export async function getAccountInfoAction(): Promise<AccountInfo | null> {
-  try {
-    return await ZaloSingletonService.getInstance().getAccountInfo();
-  } catch (error) {
-    console.error("[Action Error] getAccountInfoAction:", error);
-    throw new Error(
-      error instanceof Error ? error.message : "Lỗi không xác định ở Action",
-    );
-  }
-}
-
-export async function getThreadsAction(): Promise<ThreadInfo[]> {
-  try {
-    return await ZaloSingletonService.getInstance().getThreads();
-  } catch (error) {
-    console.error("[Action Error] getThreadsAction:", error);
-    throw new Error(
-      error instanceof Error ? error.message : "Lỗi không xác định ở Action",
-    );
+  } catch (error: any) {
+    console.error("[ChatAction] Send Error:", error);
+    return { success: false, error: error.message };
   }
 }
 
 /**
- * Action: Cập nhật trạng thái Bật/Tắt của Bot Nhại
+ * Gửi Sticker
+ */
+export async function sendStickerAction(
+  botId: string,
+  stickerId: number,
+  cateId: number,
+  threadId: string,
+  type: ThreadType,
+) {
+  try {
+    const api = getBotAPI(botId);
+    await api.sendSticker(
+      {
+        id: stickerId,
+        cateId: cateId,
+        type: 1, // <-- Added this field
+      },
+      threadId,
+      type === ThreadType.Group ? 1 : 0,
+    );
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+}
+
+/**
+ * Bật/Tắt chế độ Echo (Bot nhại) - Lưu ý: Logic này nên chuyển vào DB hoặc Runtime State
+ * Hiện tại tạm thời bỏ qua hoặc implement đơn giản.
  */
 export async function setEchoBotStateAction(isEnabled: boolean) {
-  console.log(`[Action] Yêu cầu setEchoBotStateAction: ${isEnabled}`);
-  // Đây là lệnh 'void', không cần try/catch trừ khi muốn báo lỗi về UI
-  ZaloSingletonService.getInstance().setEchoBotState(isEnabled);
-}
-
-export async function sendVoiceAction(
-  options: SendVoiceOptions,
-  threadId: string,
-  type: ThreadType,
-) {
-  console.log(`[Action] Yêu cầu sendVoiceAction đến: ${threadId}`);
-  try {
-    return await ZaloSingletonService.getInstance().sendVoice(
-      options,
-      threadId,
-      type,
-    );
-  } catch (error: unknown) {
-    console.error("[Action Error] sendVoiceAction:", error);
-    throw new Error(error instanceof Error ? error.message : "Lỗi gửi Voice");
-  }
-}
-
-/**
- * [API] Gửi tin nhắn Video (từ URL)
- */
-export async function sendVideoAction(
-  options: SendVideoOptions,
-  threadId: string,
-  type: ThreadType,
-) {
-  console.log(`[Action] Yêu cầu sendVideoAction đến: ${threadId}`);
-  try {
-    return await ZaloSingletonService.getInstance().sendVideo(
-      options,
-      threadId,
-      type,
-    );
-  } catch (error: unknown) {
-    console.error("[Action Error] sendVideoAction:", error);
-    throw new Error(error instanceof Error ? error.message : "Lỗi gửi Video");
-  }
-}
-
-/**
- * [API] Gửi tin nhắn Link (Preview)
- */
-export async function sendLinkAction(
-  options: SendLinkOptions,
-  threadId: string,
-  type: ThreadType,
-) {
-  console.log(`[Action] Yêu cầu sendLinkAction đến: ${threadId}`);
-  try {
-    return await ZaloSingletonService.getInstance().sendLink(
-      options,
-      threadId,
-      type,
-    );
-  } catch (error: unknown) {
-    console.error("[Action Error] sendLinkAction:", error);
-    throw new Error(error instanceof Error ? error.message : "Lỗi gửi Link");
-  }
+  // Logic Echo Bot nên được gắn với từng Bot ID cụ thể trong RuntimeManager
+  // Hiện tại để trống để tránh lỗi build
+  console.log("Set Echo State:", isEnabled);
 }

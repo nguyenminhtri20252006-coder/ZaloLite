@@ -2,11 +2,13 @@
 
 /**
  * app/components/modules/ChatFrame.tsx
- *
- * Module 3: Khung chat chính
+ * [REFACTORED & CLEANED]
+ * - Loại bỏ logic Test/Debug cũ.
+ * - Loại bỏ tính năng Vocabulary (EdTech).
+ * - Tối ưu cho Multi-Bot CRM.
  */
+
 import { useState, useRef, useEffect, FormEvent, ChangeEvent } from "react";
-// SỬA ĐỔI (Lô 3): Import thêm UserCacheEntry
 import {
   ThreadInfo,
   ZaloMessage,
@@ -15,205 +17,104 @@ import {
   ZaloStickerContent,
   ZaloVoiceContent,
   ZaloVideoContent,
-  ThreadType,
 } from "@/lib/types/zalo.types";
 import { Avatar } from "@/app/components/ui/Avatar";
-// THÊM MỚI: Import IconBookOpen
-import {
-  IconInfo,
-  IconSend,
-  IconBookOpen,
-  IconCog,
-} from "@/app/components/ui/Icons";
-// Import Action Test Mới
-import {
-  testMediaAction,
-  testVocabularyAction,
-} from "@/lib/actions/test.actions";
-// THÊM MỚI: Import StyledText
+import { IconInfo, IconSend } from "@/app/components/ui/Icons";
 import { StyledText } from "@/app/components/ui/StyledText";
 import { ZaloStyle } from "@/lib/utils/text-renderer";
 
-/** 1. Hiển thị Ảnh */
-const PhotoMessage = ({ content }: { content: ZaloAttachmentContent }) => {
-  // Ưu tiên ảnh thumb để load nhanh, click vào href (HD) nếu cần (ở đây hiển thị đơn giản)
-  return (
-    <div className="overflow-hidden rounded-lg bg-black/20">
-      <img
-        src={content.thumb || content.href}
-        alt="Photo"
-        className="max-h-64 w-auto object-contain"
-        loading="lazy"
-        onError={(e) => {
-          (e.target as HTMLImageElement).style.display = "none";
-        }}
-      />
-      {content.title && (
-        <p className="p-2 text-xs text-gray-300">{content.title}</p>
-      )}
-    </div>
-  );
-};
+// --- SUB-COMPONENTS HIỂN THỊ TIN NHẮN ---
 
-/** 2. Hiển thị Sticker */
-const StickerMessage = ({ content }: { content: ZaloStickerContent }) => {
-  return (
-    <div className="flex flex-col items-center rounded-lg bg-yellow-100/10 p-3">
-      <span className="text-2xl">🐱</span>
-      <span className="text-xs text-yellow-200 font-mono">
-        [Sticker ID: {content.id}]
-      </span>
-    </div>
-  );
-};
+const PhotoMessage = ({ content }: { content: ZaloAttachmentContent }) => (
+  <div className="overflow-hidden rounded-lg bg-black/20">
+    <img
+      src={content.thumb || content.href}
+      alt="Photo"
+      className="max-h-64 w-auto object-contain"
+      loading="lazy"
+      onError={(e) => {
+        (e.target as HTMLImageElement).style.display = "none";
+      }}
+    />
+  </div>
+);
 
-/** 3. Hiển thị Voice */
-const VoiceMessage = ({ content }: { content: ZaloVoiceContent }) => {
-  return (
-    <div className="flex items-center gap-2 rounded-lg bg-gray-600 p-2">
+const StickerMessage = ({ content }: { content: ZaloStickerContent }) => (
+  <div className="flex flex-col items-center rounded-lg bg-yellow-100/10 p-3">
+    <img
+      src={content.url}
+      alt="Sticker"
+      className="w-24 h-24 object-contain"
+      onError={(e) => {
+        (e.target as HTMLImageElement).style.display = "none";
+      }}
+    />
+    {!content.url && <span className="text-4xl">🐱</span>}
+  </div>
+);
+
+const VoiceMessage = ({ content }: { content: ZaloVoiceContent }) => (
+  <div className="flex items-center gap-3 rounded-lg bg-gray-600 p-3 min-w-[200px]">
+    <div className="p-2 bg-gray-500 rounded-full">
       <span className="text-xl">🎤</span>
-      <div className="flex flex-col">
-        <span className="text-xs text-gray-300">Tin nhắn thoại</span>
-        {/* Dùng thẻ audio mặc định của trình duyệt */}
-        <audio controls src={content.href} className="h-8 w-48" />
-      </div>
     </div>
-  );
-};
-
-/** 4. THÊM MỚI: Hiển thị Video */
-const VideoMessage = ({ content }: { content: ZaloVideoContent }) => {
-  return (
-    <div className="overflow-hidden rounded-lg bg-black">
-      <video
-        controls
-        poster={content.thumb}
-        className="max-h-64 w-full max-w-xs object-contain"
-      >
-        <source src={content.href} type="video/mp4" />
-        Trình duyệt của bạn không hỗ trợ thẻ video.
-      </video>
-      {content.duration && (
-        <div className="p-2 text-xs text-gray-400">
-          Thời lượng: {(content.duration / 1000).toFixed(1)}s
-        </div>
-      )}
+    <div className="flex flex-col flex-1">
+      <span className="text-xs text-gray-300 mb-1">Tin nhắn thoại</span>
+      <audio controls src={content.href} className="h-8 w-full" />
     </div>
-  );
-};
+  </div>
+);
 
-/** 5. Hiển thị Link Preview */
-const LinkMessage = ({ content }: { content: ZaloAttachmentContent }) => {
-  return (
-    <a
-      href={content.href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="flex flex-col overflow-hidden rounded-lg bg-gray-900 hover:bg-gray-950 transition-colors border border-gray-700"
+const VideoMessage = ({ content }: { content: ZaloVideoContent }) => (
+  <div className="overflow-hidden rounded-lg bg-black">
+    <video
+      controls
+      poster={content.thumb}
+      className="max-h-64 w-full max-w-xs object-contain"
     >
-      {content.thumb && (
-        <img
-          src={content.thumb}
-          alt="Link Thumb"
-          className="h-32 w-full object-cover"
-        />
-      )}
-      <div className="p-2">
-        <h4 className="font-bold text-blue-400 truncate">
-          {content.title || content.href}
-        </h4>
-        <p className="text-xs text-gray-400 truncate">{content.description}</p>
-      </div>
-    </a>
-  );
-};
+      <source src={content.href} type="video/mp4" />
+      Trình duyệt không hỗ trợ thẻ video.
+    </video>
+  </div>
+);
 
-/** 5. Hiển thị Reply Block (Trích dẫn) */
+const LinkMessage = ({ content }: { content: ZaloAttachmentContent }) => (
+  <a
+    href={content.href}
+    target="_blank"
+    rel="noopener noreferrer"
+    className="flex flex-col overflow-hidden rounded-lg bg-gray-900 hover:bg-gray-950 transition-colors border border-gray-700 max-w-sm"
+  >
+    {content.thumb && (
+      <img
+        src={content.thumb}
+        alt="Thumb"
+        className="h-32 w-full object-cover"
+      />
+    )}
+    <div className="p-3">
+      <h4 className="font-bold text-blue-400 truncate text-sm">
+        {content.title || content.href}
+      </h4>
+      <p className="text-xs text-gray-400 line-clamp-2 mt-1">
+        {content.description}
+      </p>
+    </div>
+  </a>
+);
+
 const ReplyBlock = ({
   quote,
 }: {
   quote: NonNullable<ZaloMessage["data"]["quote"]>;
-}) => {
-  return (
-    <div className="mb-1 flex flex-col border-l-4 border-gray-500 bg-gray-800/50 pl-2 p-1 rounded-r text-xs text-gray-400">
-      <span className="font-bold text-gray-300">{quote.fromD}</span>
-      <span className="truncate italic">
-        {quote.msg || "[Nội dung đính kèm]"}
-      </span>
-    </div>
-  );
-};
-
-// --- COMPONENT MENU DEBUG (MỚI) ---
-function DebugMenu({
-  onRunTest,
-  isTesting,
-}: {
-  onRunTest: (type: string, subType?: string) => void;
-  isTesting: boolean;
-}) {
-  const [isOpen, setIsOpen] = useState(false);
-
-  return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className="rounded-lg p-2 text-gray-400 hover:bg-gray-700 hover:text-white"
-        title="Menu Kiểm thử (Debug)"
-      >
-        <IconCog
-          className={`h-6 w-6 ${
-            isTesting ? "animate-spin text-yellow-500" : ""
-          }`}
-        />
-      </button>
-
-      {isOpen && (
-        // FIX CSS: Đổi 'bottom-full mb-2' thành 'top-full mt-2' để popup hiển thị xuống dưới
-        <div className="absolute top-full right-0 mt-2 w-56 rounded-lg border border-gray-600 bg-gray-900 p-2 shadow-xl z-50">
-          <h4 className="mb-2 border-b border-gray-700 pb-1 text-xs font-bold uppercase text-gray-400">
-            Test Suites
-          </h4>
-
-          {/* Suite: Media */}
-          <div className="mb-2 flex flex-col gap-1">
-            <span className="text-xs text-blue-400">Media & Format</span>
-            <button
-              onClick={() => onRunTest("media", "style")}
-              className="text-left text-sm text-gray-300 hover:text-white hover:bg-gray-800 px-2 py-1 rounded"
-            >
-              📝 Styled Text (Bold/Color)
-            </button>
-            <button
-              onClick={() => onRunTest("media", "image")}
-              className="text-left text-sm text-gray-300 hover:text-white hover:bg-gray-800 px-2 py-1 rounded"
-            >
-              🖼️ Image (Buffer)
-            </button>
-            <button
-              onClick={() => onRunTest("media", "voice")}
-              className="text-left text-sm text-gray-300 hover:text-white hover:bg-gray-800 px-2 py-1 rounded"
-            >
-              🎤 Voice (URL)
-            </button>
-          </div>
-
-          {/* Suite: Vocab */}
-          <div className="flex flex-col gap-1">
-            <span className="text-xs text-green-400">Business Logic</span>
-            <button
-              onClick={() => onRunTest("vocab")}
-              className="text-left text-sm text-gray-300 hover:text-white hover:bg-gray-800 px-2 py-1 rounded"
-            >
-              📚 Vocab Templates (Full)
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
+}) => (
+  <div className="mb-1 flex flex-col border-l-2 border-gray-400 bg-black/10 pl-2 py-1 text-xs text-gray-300">
+    <span className="font-bold">{quote.fromD}</span>
+    <span className="truncate italic opacity-80">
+      {quote.msg || "[Đính kèm]"}
+    </span>
+  </div>
+);
 
 // --- COMPONENT CHÍNH ---
 
@@ -224,9 +125,8 @@ export function ChatFrame({
   onToggleDetails,
   isEchoBotEnabled,
   onToggleEchoBot,
-  onSendVocabulary,
+  // Loại bỏ các props cũ (test, vocab) để code sạch hơn
   isSendingMessage,
-  isSendingVocab,
   onSetError,
   userCache,
 }: {
@@ -236,75 +136,36 @@ export function ChatFrame({
   onToggleDetails: () => void;
   isEchoBotEnabled: boolean;
   onToggleEchoBot: (e: ChangeEvent<HTMLInputElement>) => void;
-  onSendVocabulary: (topic: string, type: 0 | 1) => Promise<void>;
+  // Giữ lại props tương thích nhưng không dùng (hoặc nên xóa ở BotInterface sau)
+  onSendVocabulary?: any;
+  isSendingVocab?: any;
   isSendingMessage: boolean;
-  isSendingVocab: boolean;
   onSetError: (message: string | null) => void;
-  // THÊM MỚI (Lô 3)
   userCache: Record<string, UserCacheEntry>;
 }) {
   const [messageContent, setMessageContent] = useState("");
-  const [isTesting, setIsTesting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Tự cuộn xuống khi có tin nhắn mới
+  // Auto scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Xử lý Gửi tin nhắn thường
   const handleFormSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!messageContent || isSendingMessage || isSendingVocab || !thread)
-      return;
+    if (!messageContent.trim() || isSendingMessage || !thread) return;
 
-    // Không cần setIsLoading(true)
-    await onSendMessage(messageContent);
-    setMessageContent("");
-    // Không cần setIsLoading(false)
+    const contentToSend = messageContent;
+    setMessageContent(""); // Optimistic clear
+    await onSendMessage(contentToSend);
   };
 
-  // THÊM MỚI: Xử lý Gửi Từ vựng
-  const triggerSendVocabulary = () => {
-    if (!thread || isSendingMessage || isSendingVocab) return;
-    const topic = window.prompt("Gửi Từ Vựng\n\nVui lòng nhập Chủ đề (Topic):");
-    if (topic && topic.trim()) {
-      onSetError(null);
-      onSendVocabulary(topic.trim(), thread.type);
-    }
-  };
-
-  // --- HÀM XỬ LÝ TEST TẬP TRUNG ---
-  const handleRunTest = async (category: string, subType?: string) => {
-    if (!thread || isTesting) return;
-    setIsTesting(true);
-    onSetError(null);
-
-    try {
-      // Fix 1: Ép kiểu an toàn từ number sang Enum (thông qua number trung gian)
-      const threadType = thread.type as number as ThreadType;
-
-      if (category === "media" && subType) {
-        // Fix 2: Định nghĩa kiểu MediaFeature để ép kiểu string
-        type MediaFeature = "style" | "image" | "voice" | "link";
-        const feature = subType as MediaFeature;
-        await testMediaAction(thread.id, threadType, feature);
-      } else if (category === "vocab") {
-        await testVocabularyAction(thread.id, threadType);
-      }
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : "Lỗi khi chạy test";
-      onSetError(msg);
-    } finally {
-      setIsTesting(false);
-    }
-  };
-
-  // Hàm Render Content Thông minh
+  // Render nội dung tin nhắn
   const renderMessageBody = (msg: ZaloMessage) => {
     const { msgType, content, quote } = msg.data;
+
     const renderContent = () => {
-      // 1. Xử lý Text & Rich Text
+      // 1. Text & Rich Text
       if (msgType === "webchat") {
         let text = "";
         let styles: ZaloStyle[] | undefined = undefined;
@@ -312,63 +173,50 @@ export function ChatFrame({
         if (typeof content === "string") {
           text = content;
         } else if (typeof content === "object" && content !== null) {
-          // Ép kiểu để lấy msg và styles từ object content thô
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const c = content as any;
-
-          // [FIXED LOGIC] Ưu tiên 'title' (Rich Text) -> 'msg' -> 'description' -> 'content'
           text =
             c.title || c.msg || c.message || c.description || c.content || "";
 
-          // 1. Styles trực tiếp
-          if (Array.isArray(c.styles)) {
-            styles = c.styles;
-          }
-          // 2. Styles trong 'params' string JSON
+          if (Array.isArray(c.styles)) styles = c.styles;
           else if (typeof c.params === "string") {
             try {
               const p = JSON.parse(c.params);
-              if (p && Array.isArray(p.styles)) {
-                styles = p.styles;
-              }
-            } catch (e) {
-              /* Ignore parse error */
-            }
+              if (p?.styles) styles = p.styles;
+            } catch {}
           }
         }
-
         return (
-          <StyledText text={text} styles={styles} className="text-white" />
+          <StyledText
+            text={text}
+            styles={styles}
+            className="text-white text-sm"
+          />
         );
       }
 
+      // 2. Multimedia
       if (msgType === "chat.photo")
         return <PhotoMessage content={content as ZaloAttachmentContent} />;
       if (msgType === "chat.sticker")
         return <StickerMessage content={content as ZaloStickerContent} />;
       if (msgType === "chat.voice")
         return <VoiceMessage content={content as ZaloVoiceContent} />;
-      if (msgType === "chat.recommended")
-        return <LinkMessage content={content as ZaloAttachmentContent} />;
       if (msgType === "chat.video.msg")
         return <VideoMessage content={content as ZaloVideoContent} />;
+      if (msgType === "chat.recommended")
+        return <LinkMessage content={content as ZaloAttachmentContent} />;
 
+      // 3. Fallback
       return (
-        <div className="rounded border border-dashed border-gray-500 p-2 text-xs text-gray-400">
-          [Chưa hỗ trợ: {msgType}]
-          <br />
-          {typeof content === "object" && content !== null
-            ? JSON.stringify(content).slice(0, 50) + "..."
-            : String(content)}
+        <div className="text-xs text-gray-400 italic">
+          [Tin nhắn loại: {msgType}]
         </div>
       );
     };
 
     return (
       <div className="flex flex-col">
-        {/* Hiển thị Reply nếu có */}
         {quote && <ReplyBlock quote={quote} />}
-        {/* Hiển thị Nội dung chính */}
         {renderContent()}
       </div>
     );
@@ -376,86 +224,106 @@ export function ChatFrame({
 
   if (!thread) {
     return (
-      <div className="flex h-full flex-1 items-center justify-center bg-gray-800">
-        <p className="text-gray-500">Chọn một hội thoại để bắt đầu</p>
+      <div className="flex h-full flex-1 flex-col items-center justify-center bg-gray-800 text-gray-500 gap-4">
+        <div className="w-24 h-24 bg-gray-700/50 rounded-full flex items-center justify-center">
+          <span className="text-4xl">💬</span>
+        </div>
+        <p>Chọn một hội thoại để bắt đầu chat</p>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-1 flex-col bg-gray-800">
-      <header className="flex h-[72px] items-center justify-between border-b border-gray-700 p-4">
-        <div className="flex items-center gap-3">
-          <Avatar
-            src={thread.avatar}
-            alt={thread.name}
-            isGroup={thread.type === 1}
-          />
+    <div className="flex h-full flex-1 flex-col bg-gray-800 relative">
+      {/* 1. Header */}
+      <header className="flex h-[72px] items-center justify-between border-b border-gray-700 px-6 py-4 bg-gray-900/50 backdrop-blur-sm z-10">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <Avatar
+              src={thread.avatar}
+              alt={thread.name}
+              isGroup={thread.type === 1}
+            />
+            <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-gray-900 rounded-full"></div>
+          </div>
           <div>
-            <h2 className="text-lg font-bold text-white">{thread.name}</h2>
-            <p className="text-sm text-green-400">Đang hoạt động</p>
+            <h2 className="text-base font-bold text-white leading-tight">
+              {thread.name}
+            </h2>
+            <p className="text-xs text-green-400 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
+              Online
+            </p>
           </div>
         </div>
 
-        {/* MENU DEBUG (Thay thế nút Info cũ hoặc thêm bên cạnh) */}
-        <div className="flex items-center gap-2">
-          <DebugMenu onRunTest={handleRunTest} isTesting={isTesting} />
-
-          <button
-            onClick={onToggleDetails}
-            className="rounded-lg p-2 text-gray-400 hover:bg-gray-700 hover:text-white"
-          >
-            <IconInfo className="h-6 w-6" />
-          </button>
-        </div>
+        <button
+          onClick={onToggleDetails}
+          className="p-2 text-gray-400 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
+          title="Thông tin hội thoại"
+        >
+          <IconInfo className="h-6 w-6" />
+        </button>
       </header>
 
-      {/* Khung Log Tin nhắn */}
-      <div className="flex-1 space-y-4 overflow-y-auto p-4">
+      {/* 2. Message Log */}
+      <div className="flex-1 space-y-6 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-gray-700">
         {messages.map((msg, index) => {
+          // Resolve Sender info from Cache
           const senderInfo = userCache[msg.data.uidFrom];
-          const senderName = senderInfo?.name || msg.data.dName;
+          const senderName =
+            senderInfo?.name ||
+            msg.data.dName ||
+            (msg.isSelf ? "Tôi" : "Người lạ");
           const senderAvatar = senderInfo?.avatar || "";
 
-          const avatarToShow = thread.type === 0 ? thread.avatar : senderAvatar;
+          // Logic Avatar: Group -> Show sender avatar; 1-1 -> Show partner avatar if not self
+          const showAvatar = thread.type === 1 && !msg.isSelf;
+          const avatarUrl = showAvatar ? senderAvatar : "";
 
           return (
             <div
               key={msg.data.msgId + index}
-              className={`flex max-w-lg items-start gap-3 ${
+              className={`flex max-w-[85%] gap-3 ${
                 msg.isSelf ? "ml-auto flex-row-reverse" : "mr-auto"
               }`}
             >
-              {/* SỬA ĐỔI (Lô 3.5): Hiển thị avatar cho MỌI tin nhắn đến, không chỉ nhóm */}
-              {!msg.isSelf ? (
-                <div className="flex-shrink-0">
-                  <Avatar src={avatarToShow} alt={senderName} isGroup={false} />
-                </div>
-              ) : (
-                // Tin nhắn của mình (isSelf) không cần avatar, nhưng cần placeholder để căn lề
-                <div className="w-10 flex-shrink-0"></div>
-              )}
+              {/* Avatar (Chỉ hiện cho tin nhắn người khác trong nhóm) */}
+              <div className="flex-shrink-0 w-8">
+                {showAvatar && (
+                  <Avatar src={avatarUrl} alt={senderName} isGroup={false} />
+                )}
+              </div>
 
               <div
                 className={`flex flex-col ${
                   msg.isSelf ? "items-end" : "items-start"
                 }`}
               >
-                {/* SỬA ĐỔI (Lô 3): Hiển thị tên (chỉ khi là nhóm VÀ không phải của mình) */}
+                {/* Sender Name (Group only) */}
                 {thread.type === 1 && !msg.isSelf && (
-                  <span className="text-xs text-gray-400">{senderName}</span>
+                  <span className="text-[10px] text-gray-400 mb-1 ml-1">
+                    {senderName}
+                  </span>
                 )}
+
+                {/* Bubble */}
                 <div
-                  className={`mt-1 rounded-lg p-3 ${
+                  className={`relative rounded-2xl px-4 py-2 shadow-sm ${
                     msg.isSelf
-                      ? "rounded-br-none bg-blue-700"
-                      : "rounded-bl-none bg-gray-700"
+                      ? "bg-blue-600 text-white rounded-tr-sm"
+                      : "bg-gray-700 text-gray-100 rounded-tl-sm"
                   }`}
                 >
                   {renderMessageBody(msg)}
                 </div>
-                <span className="mt-1 text-xs text-gray-500">
-                  {new Date(parseInt(msg.data.ts, 10)).toLocaleTimeString()}
+
+                {/* Time */}
+                <span className="text-[9px] text-gray-500 mt-1 mx-1">
+                  {new Date(parseInt(msg.data.ts, 10)).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
                 </span>
               </div>
             </div>
@@ -464,63 +332,53 @@ export function ChatFrame({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Form Gửi tin */}
-      <footer className="border-t border-gray-700 p-4">
-        <form onSubmit={handleFormSubmit} className="flex items-center gap-3">
-          {/* THÊM MỚI: Nút Gửi Từ vựng */}
-          <button
-            type="button"
-            onClick={triggerSendVocabulary}
-            disabled={isSendingMessage || isSendingVocab || isTesting}
-            className="rounded-lg bg-purple-600 p-3 text-white hover:bg-purple-700 disabled:bg-gray-600"
-            title="Gửi Từ vựng (API)"
+      {/* 3. Input Area */}
+      <div className="p-4 bg-gray-900 border-t border-gray-700">
+        <form
+          onSubmit={handleFormSubmit}
+          className="flex items-end gap-2 bg-gray-800 p-2 rounded-xl border border-gray-700 focus-within:border-blue-500 transition-colors"
+        >
+          {/* Echo Bot Toggle (Mini) */}
+          <div
+            className="flex items-center self-center pl-2 pr-2 border-r border-gray-700"
+            title="Bot nhại lại"
           >
-            {isSendingVocab ? "⏳" : <IconBookOpen className="h-6 w-6" />}
-          </button>
+            <input
+              type="checkbox"
+              checked={isEchoBotEnabled}
+              onChange={onToggleEchoBot}
+              className="w-4 h-4 accent-blue-500 cursor-pointer"
+            />
+          </div>
 
           <textarea
             value={messageContent}
             onChange={(e) => setMessageContent(e.target.value)}
-            placeholder="Viết tin nhắn..."
+            placeholder={`Nhập tin nhắn tới ${thread.name}...`}
             rows={1}
-            className="flex-1 resize-none rounded-lg border border-gray-600 bg-gray-700 p-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="flex-1 bg-transparent text-white text-sm px-2 py-2.5 focus:outline-none resize-none max-h-32"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 handleFormSubmit(e);
               }
             }}
+            style={{ minHeight: "44px" }}
           />
+
           <button
             type="submit"
-            disabled={isSendingMessage || isSendingVocab || !messageContent}
-            className="rounded-lg bg-blue-600 p-3 text-white hover:bg-blue-700 disabled:opacity-50"
+            disabled={isSendingMessage || !messageContent.trim()}
+            className="p-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg disabled:opacity-50 disabled:bg-gray-700 transition-all self-end mb-[1px]"
           >
             {isSendingMessage ? (
-              <span className="animate-spin">⏳</span>
+              <span className="block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
             ) : (
-              <IconSend className="h-6 w-6" />
+              <IconSend className="w-5 h-5" />
             )}
           </button>
         </form>
-        {/* Công tắc Bot Nhại */}
-        <div className="border-t border-gray-700 pt-3 mt-3">
-          <label className="flex items-center justify-between cursor-pointer">
-            <span className="text-sm font-medium text-gray-300">
-              Bot Nhại Lại (Echo Bot)
-            </span>
-            <div className="relative inline-flex items-center">
-              <input
-                type="checkbox"
-                className="sr-only peer"
-                checked={isEchoBotEnabled}
-                onChange={onToggleEchoBot}
-              />
-              <div className="peer h-6 w-11 rounded-full bg-gray-600 after:absolute after:top-0.5 after:left-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-gray-300 after:bg-white after:transition-all peer-checked:bg-blue-600 peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
-            </div>
-          </label>
-        </div>
-      </footer>
+      </div>
     </div>
   );
 }
