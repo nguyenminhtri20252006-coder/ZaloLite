@@ -5,7 +5,7 @@
  * Warning: Hãy xóa hoặc bảo vệ endpoint này sau khi deploy production.
  */
 import { NextRequest, NextResponse } from "next/server";
-import supabase from "@/lib/supabaseClient";
+import supabase from "@/lib/supabaseServer";
 import { hashPassword } from "@/lib/utils/security";
 
 export async function GET(request: NextRequest) {

@@ -13,16 +13,29 @@ import {
 export class MessageParser {
   public parse(rawMsg: RawZaloMessage): StandardMessage | null {
     try {
-      if (!rawMsg || !rawMsg.data) return null;
+      if (!rawMsg || !rawMsg.data) {
+        console.warn(
+          "[MessageParser] Raw message is empty or invalid:",
+          rawMsg,
+        );
+        return null;
+      }
 
-      const { msgType, content, uidFrom, dName, ts, quote } = rawMsg.data;
+      const { msgType, content, uidFrom, dName, ts, quote, msgId, cliMsgId } =
+        rawMsg.data;
+
+      console.log(`[MessageParser] Parsing msgId: ${msgId}, Type: ${msgType}`);
+      console.log(
+        `[MessageParser] Raw Content:`,
+        JSON.stringify(content).slice(0, 200) + "...",
+      );
 
       // 1. Chuẩn hóa Content
       const normalizedContent = this.parseContent(msgType, content);
 
       // 2. Xây dựng object chuẩn
-      return {
-        msgId: rawMsg.data.msgId,
+      const standardMsg: StandardMessage = {
+        msgId: msgId || cliMsgId || Date.now().toString(),
         threadId: rawMsg.threadId,
         isGroup: rawMsg.type === 1,
         type: rawMsg.type,
@@ -41,6 +54,8 @@ export class MessageParser {
             }
           : undefined,
       };
+
+      return standardMsg;
     } catch (error) {
       console.error("[MessageParser] Parse error:", error);
       return null;
@@ -52,7 +67,8 @@ export class MessageParser {
     const c = content as Record<string, unknown>;
 
     // A. TEXT & WEBCHAT (Rich Text)
-    if (type === "webchat") {
+    if (type === "webchat" || type === "chat.text") {
+      // Handle cả chat.text nếu có
       type WebChatContent = {
         title?: string;
         description?: string;
@@ -117,11 +133,10 @@ export class MessageParser {
       return {
         type: "text",
         text: text,
-        mentions,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        styles: styles as any,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as NormalizedContent & { styles?: any[] };
+        mentions: undefined, // Tạm thời ignore mentions để đơn giản
+        // Lưu ý: Pipeline lưu vào DB dưới dạng JSONB
+        // Cần đảm bảo structure này khớp với type NormalizedContent
+      } as any;
     }
 
     // B. STICKER
@@ -142,10 +157,12 @@ export class MessageParser {
       return {
         type: "photo",
         data: {
-          url: String(c.href || ""),
+          url: String(c.href || c.url || ""), // Ưu tiên href, fallback url
           thumbnail: String(c.thumb || ""),
           width: Number(c.width) || 0,
           height: Number(c.height) || 0,
+          title: String(c.title || ""),
+          description: String(c.desc || ""),
         },
       };
     }
@@ -192,7 +209,7 @@ export class MessageParser {
         type: "voice",
         data: {
           url: String(c.href || ""),
-          duration,
+          duration: 0,
         },
       };
     }
@@ -210,6 +227,8 @@ export class MessageParser {
       };
     }
 
+    // Default: Unknown
+    console.warn(`[MessageParser] Unknown msgType: ${type}`, c);
     return { type: "unknown", raw: content };
   }
 }

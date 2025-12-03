@@ -1,17 +1,12 @@
 "use server";
 
-/**
- * lib/actions/bot.actions.ts
- * Server Actions để giao tiếp giữa UI và BotRuntimeManager.
- */
-
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
-import supabase from "@/lib/supabaseClient";
+import supabase from "@/lib/supabaseServer";
 import { revalidatePath } from "next/cache";
 import { ZaloBot } from "@/lib/types/database.types";
 
 /**
- * Lấy danh sách tất cả các Bot
+ * Lấy danh sách Bot
  */
 export async function getBotsAction() {
   const { data, error } = await supabase
@@ -24,14 +19,17 @@ export async function getBotsAction() {
 }
 
 /**
- * Tạo mới một Bot (Placeholder)
+ * [FLOW 1] Tạo Bot Placeholder cho QR Login
+ * Tên tạm: "New Bot..." -> Sẽ được update sau khi login thành công
  */
-export async function createBotAction(name: string) {
+export async function createPlaceholderBotAction() {
+  const tempName = `New Bot ${new Date().toLocaleTimeString()}`;
+
   const { data, error } = await supabase
     .from("zalo_bots")
     .insert({
-      name: name,
-      global_id: `temp_${Date.now()}`, // ID tạm, sẽ update khi login thành công
+      name: tempName,
+      global_id: `temp_${Date.now()}`,
       status: { state: "STOPPED" },
       is_active: true,
     })
@@ -39,29 +37,83 @@ export async function createBotAction(name: string) {
     .single();
 
   if (error) throw new Error(error.message);
-  revalidatePath("/dashboard"); // Refresh UI
+  revalidatePath("/dashboard");
   return data as ZaloBot;
 }
 
 /**
- * Yêu cầu bắt đầu Login QR cho Bot
+ * [FLOW 1] Trigger Login QR
  */
 export async function startBotLoginAction(botId: string) {
-  console.log(`[Action] Trigger Login QR for bot: ${botId}`);
   const manager = BotRuntimeManager.getInstance();
-
-  // Hàm này là void, chạy ngầm. Kết quả trả về qua SSE event.
-  // Chúng ta không await kết quả login, chỉ await việc kích hoạt.
-  await manager.startLoginQR(botId);
-
-  return { success: true, message: "QR Code is generating..." };
+  // Chạy background, không await kết quả login
+  manager.startLoginQR(botId);
+  return { success: true };
 }
 
 /**
- * Xóa Bot
+ * [FLOW 2] Thêm Bot bằng Token JSON
  */
+export async function addBotWithTokenAction(tokenJson: string) {
+  let credentials;
+  try {
+    credentials = JSON.parse(tokenJson);
+    if (!credentials.cookie || !credentials.imei) {
+      throw new Error("JSON thiếu trường 'cookie' hoặc 'imei'.");
+    }
+  } catch (e) {
+    return { success: false, error: "Format JSON không hợp lệ." };
+  }
+
+  try {
+    // 1. Tạo Bot Placeholder trước
+    const bot = await createPlaceholderBotAction();
+
+    // 2. Gọi Runtime để login thử
+    const manager = BotRuntimeManager.getInstance();
+    await manager.loginWithCredentials(bot.id, credentials);
+
+    revalidatePath("/dashboard");
+    return { success: true, botId: bot.id };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * [RETRY] Thử đăng nhập lại với Token cũ trong DB
+ */
+export async function retryBotLoginAction(botId: string) {
+  // 1. Lấy token từ DB
+  const { data: bot } = await supabase
+    .from("zalo_bots")
+    .select("access_token")
+    .eq("id", botId)
+    .single();
+
+  if (!bot || !bot.access_token) {
+    return {
+      success: false,
+      error: "Không tìm thấy token cũ. Vui lòng thêm lại bot.",
+    };
+  }
+
+  try {
+    const manager = BotRuntimeManager.getInstance();
+    await manager.loginWithCredentials(botId, bot.access_token);
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
+
 export async function deleteBotAction(botId: string) {
   const { error } = await supabase.from("zalo_bots").delete().eq("id", botId);
   if (error) throw new Error(error.message);
+
+  // Stop runtime
+  const manager = BotRuntimeManager.getInstance();
+  await manager.stopBot(botId);
+
   revalidatePath("/dashboard");
 }

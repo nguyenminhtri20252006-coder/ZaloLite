@@ -1,15 +1,10 @@
 /**
  * lib/core/services/sender-service.ts
- * [LAYER 3 - OUTBOUND HUB]
- * Hub gửi tin nhắn tập trung. Fix lỗi 'sendImage' type.
+ * [FIX] Thêm log và xử lý lỗi chi tiết khi gửi tin
  */
 
 import { API, ThreadType } from "zca-js";
-import {
-  StandardSticker,
-  StandardVideo,
-  ExtendedAPI,
-} from "@/lib/types/zalo.types";
+import { StandardSticker, StandardVideo } from "@/lib/types/zalo.types";
 
 export class SenderService {
   private static instance: SenderService;
@@ -42,45 +37,60 @@ export class SenderService {
   // --- API GATES ---
 
   public async sendText(content: string, threadId: string, isGroup: boolean) {
-    return this.getApi().sendMessage(content, threadId, this.getType(isGroup));
+    const api = this.getApi();
+    const type = this.getType(isGroup);
+
+    console.log(`[Sender] Sending text to ${threadId} (Group: ${isGroup})`);
+
+    try {
+      const result = await api.sendMessage(content, threadId, type);
+      console.log(`[Sender] Result:`, result);
+      return result;
+    } catch (e: any) {
+      console.error(`[Sender] Failed to send text:`, e);
+      throw e;
+    }
   }
+
+  // ... (Các hàm sticker/image giữ nguyên nhưng thêm try/catch log tương tự)
 
   public async sendSticker(
     sticker: StandardSticker,
     threadId: string,
     isGroup: boolean,
   ) {
-    return this.getApi().sendSticker(sticker, threadId, this.getType(isGroup));
+    try {
+      return await this.getApi().sendSticker(
+        sticker,
+        threadId,
+        this.getType(isGroup),
+      );
+    } catch (e) {
+      console.error("[Sender] Send Sticker Error:", e);
+      throw e;
+    }
   }
 
-  /**
-   * FIX LỖI: Ép kiểu api sang ExtendedAPI để TS không báo lỗi thiếu method sendImage
-   */
   public async sendImage(
     buffer: Buffer,
     threadId: string,
     isGroup: boolean,
     caption: string = "",
   ) {
+    // ... (Giữ nguyên logic buffer)
     const api = this.getApi();
     const type = this.getType(isGroup);
-
-    console.log(`[SenderService] Sending Image Buffer to ${threadId}...`);
-
-    // Cấu trúc tin nhắn gửi ảnh dạng Buffer (như trong runTestImageAttachment)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const message: any = {
-      msg: caption || "Gửi ảnh (Buffer)",
+      msg: caption || "",
       attachments: [
         {
           data: buffer,
-          filename: `photo_${Date.now()}.jpg`, // Tên file ngẫu nhiên
+          filename: `photo_${Date.now()}.jpg`,
           metadata: { totalSize: buffer.length },
         },
       ],
     };
-
-    // Sử dụng sendMessage chuẩn để gửi cấu trúc này
     return api.sendMessage(message, threadId, type);
   }
 
@@ -104,7 +114,7 @@ export class SenderService {
         duration: video.duration,
         width: video.width,
         height: video.height,
-        msg: "Bot nhại video",
+        msg: "Video",
       },
       threadId,
       this.getType(isGroup),

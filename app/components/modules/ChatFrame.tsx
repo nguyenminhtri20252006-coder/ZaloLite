@@ -25,10 +25,16 @@ import { ZaloStyle } from "@/lib/utils/text-renderer";
 
 // --- SUB-COMPONENTS HIỂN THỊ TIN NHẮN ---
 
-const PhotoMessage = ({ content }: { content: ZaloAttachmentContent }) => (
+const PhotoMessage = ({ content }: { content: any }) => (
   <div className="overflow-hidden rounded-lg bg-black/20">
+    {/* Hỗ trợ cả cấu trúc cũ (href) và mới (data.url) */}
     <img
-      src={content.thumb || content.href}
+      src={
+        content.data?.url ||
+        content.data?.thumbnail ||
+        content.href ||
+        content.thumb
+      }
       alt="Photo"
       className="max-h-64 w-auto object-contain"
       loading="lazy"
@@ -39,10 +45,10 @@ const PhotoMessage = ({ content }: { content: ZaloAttachmentContent }) => (
   </div>
 );
 
-const StickerMessage = ({ content }: { content: ZaloStickerContent }) => (
+const StickerMessage = ({ content }: { content: any }) => (
   <div className="flex flex-col items-center rounded-lg bg-yellow-100/10 p-3">
     <img
-      src={content.url}
+      src={content.data?.url || content.url}
       alt="Sticker"
       className="w-24 h-24 object-contain"
       onError={(e) => {
@@ -125,7 +131,6 @@ export function ChatFrame({
   onToggleDetails,
   isEchoBotEnabled,
   onToggleEchoBot,
-  // Loại bỏ các props cũ (test, vocab) để code sạch hơn
   isSendingMessage,
   onSetError,
   userCache,
@@ -136,9 +141,6 @@ export function ChatFrame({
   onToggleDetails: () => void;
   isEchoBotEnabled: boolean;
   onToggleEchoBot: (e: ChangeEvent<HTMLInputElement>) => void;
-  // Giữ lại props tương thích nhưng không dùng (hoặc nên xóa ở BotInterface sau)
-  onSendVocabulary?: any;
-  isSendingVocab?: any;
   isSendingMessage: boolean;
   onSetError: (message: string | null) => void;
   userCache: Record<string, UserCacheEntry>;
@@ -146,7 +148,6 @@ export function ChatFrame({
   const [messageContent, setMessageContent] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -154,72 +155,60 @@ export function ChatFrame({
   const handleFormSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!messageContent.trim() || isSendingMessage || !thread) return;
-
     const contentToSend = messageContent;
-    setMessageContent(""); // Optimistic clear
+    setMessageContent("");
     await onSendMessage(contentToSend);
   };
 
   // Render nội dung tin nhắn
   const renderMessageBody = (msg: ZaloMessage) => {
-    const { msgType, content, quote } = msg.data;
+    // [DEBUG] Log cấu trúc tin nhắn để kiểm tra
+    // console.log("Rendering Msg:", msg);
 
-    const renderContent = () => {
-      // 1. Text & Rich Text
-      if (msgType === "webchat") {
-        let text = "";
-        let styles: ZaloStyle[] | undefined = undefined;
+    const { msgType, content } = msg.data;
+    const safeContent = content as any;
 
-        if (typeof content === "string") {
-          text = content;
-        } else if (typeof content === "object" && content !== null) {
-          const c = content as any;
-          text =
-            c.title || c.msg || c.message || c.description || c.content || "";
+    try {
+      // 1. TEXT (webchat hoặc chat.text)
+      if (msgType === "webchat" || msgType === "chat.text") {
+        // Hỗ trợ cả cấu trúc Normalized (type: 'text', text: '...') và Raw Zalo
+        const text =
+          safeContent.type === "text"
+            ? safeContent.text
+            : safeContent.title || safeContent.msg || safeContent;
 
-          if (Array.isArray(c.styles)) styles = c.styles;
-          else if (typeof c.params === "string") {
-            try {
-              const p = JSON.parse(c.params);
-              if (p?.styles) styles = p.styles;
-            } catch {}
-          }
-        }
         return (
           <StyledText
-            text={text}
-            styles={styles}
+            text={typeof text === "string" ? text : JSON.stringify(text)}
             className="text-white text-sm"
           />
         );
       }
 
-      // 2. Multimedia
-      if (msgType === "chat.photo")
-        return <PhotoMessage content={content as ZaloAttachmentContent} />;
-      if (msgType === "chat.sticker")
-        return <StickerMessage content={content as ZaloStickerContent} />;
-      if (msgType === "chat.voice")
-        return <VoiceMessage content={content as ZaloVoiceContent} />;
-      if (msgType === "chat.video.msg")
-        return <VideoMessage content={content as ZaloVideoContent} />;
-      if (msgType === "chat.recommended")
-        return <LinkMessage content={content as ZaloAttachmentContent} />;
+      // 2. STICKER
+      if (msgType === "chat.sticker" || safeContent.type === "sticker") {
+        return <StickerMessage content={safeContent} />;
+      }
 
-      // 3. Fallback
+      // 3. PHOTO
+      if (msgType === "chat.photo" || safeContent.type === "photo") {
+        return <PhotoMessage content={safeContent} />;
+      }
+
+      // 4. Default / Fallback / Debug
       return (
-        <div className="text-xs text-gray-400 italic">
-          [Tin nhắn loại: {msgType}]
+        <div className="flex flex-col gap-1 min-w-[150px]">
+          <span className="text-xs text-yellow-500 font-bold uppercase">
+            {msgType || safeContent.type || "Unknown Type"}
+          </span>
+          <pre className="text-[10px] text-gray-400 bg-black/30 p-2 rounded overflow-x-auto max-w-xs">
+            {JSON.stringify(safeContent, null, 2)}
+          </pre>
         </div>
       );
-    };
-
-    return (
-      <div className="flex flex-col">
-        {quote && <ReplyBlock quote={quote} />}
-        {renderContent()}
-      </div>
-    );
+    } catch (e) {
+      return <div className="text-red-500 text-xs">Render Error</div>;
+    }
   };
 
   if (!thread) {
@@ -235,7 +224,7 @@ export function ChatFrame({
 
   return (
     <div className="flex h-full flex-1 flex-col bg-gray-800 relative">
-      {/* 1. Header */}
+      {/* Header */}
       <header className="flex h-[72px] items-center justify-between border-b border-gray-700 px-6 py-4 bg-gray-900/50 backdrop-blur-sm z-10">
         <div className="flex items-center gap-4">
           <div className="relative">
@@ -260,7 +249,6 @@ export function ChatFrame({
         <button
           onClick={onToggleDetails}
           className="p-2 text-gray-400 hover:bg-gray-700 hover:text-white rounded-lg transition-colors"
-          title="Thông tin hội thoại"
         >
           <IconInfo className="h-6 w-6" />
         </button>
@@ -275,23 +263,22 @@ export function ChatFrame({
             senderInfo?.name ||
             msg.data.dName ||
             (msg.isSelf ? "Tôi" : "Người lạ");
-          const senderAvatar = senderInfo?.avatar || "";
-
-          // Logic Avatar: Group -> Show sender avatar; 1-1 -> Show partner avatar if not self
           const showAvatar = thread.type === 1 && !msg.isSelf;
-          const avatarUrl = showAvatar ? senderAvatar : "";
 
           return (
             <div
-              key={msg.data.msgId + index}
+              key={(msg.data.msgId || index) + "_" + index}
               className={`flex max-w-[85%] gap-3 ${
                 msg.isSelf ? "ml-auto flex-row-reverse" : "mr-auto"
               }`}
             >
-              {/* Avatar (Chỉ hiện cho tin nhắn người khác trong nhóm) */}
               <div className="flex-shrink-0 w-8">
                 {showAvatar && (
-                  <Avatar src={avatarUrl} alt={senderName} isGroup={false} />
+                  <Avatar
+                    src={senderInfo?.avatar || ""}
+                    alt={senderName}
+                    isGroup={false}
+                  />
                 )}
               </div>
 
@@ -338,23 +325,10 @@ export function ChatFrame({
           onSubmit={handleFormSubmit}
           className="flex items-end gap-2 bg-gray-800 p-2 rounded-xl border border-gray-700 focus-within:border-blue-500 transition-colors"
         >
-          {/* Echo Bot Toggle (Mini) */}
-          <div
-            className="flex items-center self-center pl-2 pr-2 border-r border-gray-700"
-            title="Bot nhại lại"
-          >
-            <input
-              type="checkbox"
-              checked={isEchoBotEnabled}
-              onChange={onToggleEchoBot}
-              className="w-4 h-4 accent-blue-500 cursor-pointer"
-            />
-          </div>
-
           <textarea
             value={messageContent}
             onChange={(e) => setMessageContent(e.target.value)}
-            placeholder={`Nhập tin nhắn tới ${thread.name}...`}
+            placeholder={`Nhập tin nhắn...`}
             rows={1}
             className="flex-1 bg-transparent text-white text-sm px-2 py-2.5 focus:outline-none resize-none max-h-32"
             onKeyDown={(e) => {
@@ -365,17 +339,12 @@ export function ChatFrame({
             }}
             style={{ minHeight: "44px" }}
           />
-
           <button
             type="submit"
             disabled={isSendingMessage || !messageContent.trim()}
-            className="p-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg disabled:opacity-50 disabled:bg-gray-700 transition-all self-end mb-[1px]"
+            className="p-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-all self-end mb-[1px]"
           >
-            {isSendingMessage ? (
-              <span className="block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
-            ) : (
-              <IconSend className="w-5 h-5" />
-            )}
+            <IconSend className="w-5 h-5" />
           </button>
         </form>
       </div>

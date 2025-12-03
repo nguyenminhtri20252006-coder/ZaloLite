@@ -7,7 +7,7 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import supabase from "@/lib/supabaseClient";
+import supabase from "@/lib/supabaseServer";
 import {
   verifyPassword,
   createSessionToken,
