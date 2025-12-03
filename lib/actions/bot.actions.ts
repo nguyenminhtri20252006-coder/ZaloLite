@@ -42,6 +42,29 @@ export async function createPlaceholderBotAction() {
 }
 
 /**
+ * [NEW] Tạo Bot với tên tùy chỉnh (Fix lỗi 'createBotAction' not found)
+ */
+export async function createBotAction(name: string) {
+  const { data, error } = await supabase
+    .from("zalo_bots")
+    .insert({
+      name: name,
+      // Tạo ID tạm thời để bypass constraint unique, sẽ update khi login thành công
+      global_id: `temp_${Date.now()}_${Math.random()
+        .toString(36)
+        .substr(2, 9)}`,
+      status: { state: "STOPPED" },
+      is_active: true,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+  return data as ZaloBot;
+}
+
+/**
  * [FLOW 1] Trigger Login QR
  */
 export async function startBotLoginAction(botId: string) {
@@ -75,8 +98,10 @@ export async function addBotWithTokenAction(tokenJson: string) {
 
     revalidatePath("/dashboard");
     return { success: true, botId: bot.id };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    // [FIX] Xử lý lỗi unknown thay vì any
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errorMessage };
   }
 }
 
@@ -102,8 +127,10 @@ export async function retryBotLoginAction(botId: string) {
     const manager = BotRuntimeManager.getInstance();
     await manager.loginWithCredentials(botId, bot.access_token);
     return { success: true };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    // [FIX] Xử lý lỗi unknown thay vì any
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errorMessage };
   }
 }
 

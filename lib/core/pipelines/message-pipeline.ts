@@ -2,6 +2,7 @@
  * lib/core/pipelines/message-pipeline.ts
  * [PIPELINE STEP 3]
  * Xử lý logic nghiệp vụ: Upsert Customer/Conversation -> Save Message -> DB.
+ * [FIX] Logic phân loại Conversation Name (Group vs User).
  */
 
 import supabase from "@/lib/supabaseServer";
@@ -25,9 +26,7 @@ export class MessagePipeline {
       const message = this.parser.parse(rawMsg);
       if (!message) return;
 
-      // [NEW] DEDUPLICATION CHECK
-      // Nếu là tin nhắn của mình (isSelf), kiểm tra xem msgId đã tồn tại chưa
-      // Vì Action sendMessageAction có thể đã lưu nó vào DB rồi.
+      // Deduplication check (Self message)
       if (message.isSelf) {
         const { data: existing } = await supabase
           .from("messages")
@@ -35,27 +34,36 @@ export class MessagePipeline {
           .eq("zalo_msg_id", message.msgId)
           .single();
 
-        if (existing) {
-          console.log(
-            `[Pipeline] Skipped duplicated self-message: ${message.msgId}`,
-          );
-          return;
-        }
+        if (existing) return;
       }
 
-      console.log(`[Pipeline] Processing msg from ${message.sender.name}...`);
+      // 2. Xác định Tên Hội Thoại (Conversation Name)
+      // [CRITICAL FIX] Nếu là Group, KHÔNG dùng tên người gửi làm tên nhóm.
+      // Nếu là User, tên hội thoại chính là tên người gửi.
+      let conversationName = message.sender.name;
+      let conversationAvatar = message.sender.avatar;
 
-      // 1. Xác định Conversation ID (Dùng Service chung)
+      if (message.isGroup) {
+        // Với Group, ta chưa biết tên nhóm từ message event.
+        // Đặt tên tạm là ID, avatar rỗng.
+        // Metadata sẽ được update sau bởi tiến trình sync hoặc getThreadsAction.
+        conversationName = `Group ${message.threadId}`;
+        conversationAvatar = "";
+      }
+
+      // 3. Upsert Conversation
       const conversationUUID = await ConversationService.ensureConversation(
         botId,
         message.threadId,
         message.isGroup,
-        message.sender.name,
+        conversationName,
+        conversationAvatar,
       );
 
       if (!conversationUUID) return;
 
-      // 2. Xác định Sender
+      // 4. Upsert Sender (Customer)
+      // Chỉ tạo Customer nếu người gửi KHÔNG phải là Bot (isSelf = false)
       let senderUUID: string | null = null;
       let senderType = "customer";
 
@@ -64,6 +72,7 @@ export class MessagePipeline {
           botId,
           message.sender.uid,
           message.sender.name,
+          message.sender.avatar, // Truyền avatar vào service
         );
       } else {
         senderType = "staff_on_bot";
@@ -72,7 +81,7 @@ export class MessagePipeline {
 
       if (!senderUUID) return;
 
-      // 3. Insert Message
+      // 5. Insert Message
       await supabase.from("messages").insert({
         conversation_id: conversationUUID,
         sender_type: senderType,
@@ -80,10 +89,9 @@ export class MessagePipeline {
         content: message.content,
         zalo_msg_id: message.msgId,
         sent_at: new Date(message.timestamp).toISOString(),
-        // staff_id để null vì đây là pipeline tự động (hoặc gửi từ điện thoại)
       });
 
-      // 4. Update Last Activity
+      // 6. Update Last Activity
       await supabase
         .from("conversations")
         .update({ last_activity_at: new Date().toISOString() })
