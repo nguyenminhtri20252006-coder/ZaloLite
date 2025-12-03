@@ -1,7 +1,7 @@
 /**
  * lib/core/bot-runtime-manager.ts
  * [CORE ENGINE]
- * Fix: Gộp update profile và status để tránh lỗi hiển thị UI.
+ * Fix: Thêm cơ chế JSON.parse() tự động và log chi tiết quá trình trích xuất Profile.
  */
 
 import { Zalo, API } from "zca-js";
@@ -24,10 +24,12 @@ export class BotRuntimeManager {
   private constructor() {
     console.log("[BotManager] Khởi tạo Multi-Tenant Engine...");
     this.messagePipeline = new MessagePipeline();
-    this.restoreBotsFromDB();
+    // Tự động khôi phục bot sau 1 giây
+    setTimeout(() => this.restoreBotsFromDB(), 1000);
   }
 
   public static getInstance(): BotRuntimeManager {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const customGlobal = globalThis as any;
     if (!customGlobal.botRuntimeManager) {
       customGlobal.botRuntimeManager = new BotRuntimeManager();
@@ -35,64 +37,90 @@ export class BotRuntimeManager {
     return customGlobal.botRuntimeManager;
   }
 
-  /**
-   * [AUTO-RESTORE] Khôi phục tất cả bot active từ DB khi khởi động lại
-   */
+  // --- RESTORE & INIT ---
+
   public async restoreBotsFromDB() {
-    // (Logic cũ giữ nguyên)
-    const { data: bots } = await supabase
-      .from("zalo_bots")
-      .select("*")
-      .eq("is_active", true);
-    if (bots) {
-      bots.forEach((b) => {
-        if (b.access_token)
-          this.loginWithCredentials(b.id, b.access_token).catch(console.error);
-      });
+    console.log("[BotManager] Đang khôi phục các Bot từ DB...");
+    try {
+      const { data: bots, error } = await supabase
+        .from("zalo_bots")
+        .select("*")
+        .eq("is_active", true);
+
+      if (error) {
+        console.error("[BotManager] Lỗi tải bots từ DB:", error.message);
+        return;
+      }
+
+      if (bots && bots.length > 0) {
+        console.log(`[BotManager] Tìm thấy ${bots.length} bot cần khôi phục.`);
+        bots.forEach((b) => {
+          if (b.access_token) {
+            console.log(`[BotManager] Khôi phục bot: ${b.name} (${b.id})`);
+            this.loginWithCredentials(b.id, b.access_token).catch((e) => {
+              console.error(
+                `[BotManager] Khôi phục thất bại bot ${b.id}:`,
+                e.message,
+              );
+            });
+          }
+        });
+      }
+    } catch (e) {
+      console.error("[BotManager] Exception in restoreBotsFromDB:", e);
     }
   }
 
   public getOrInitBot(botId: string): BotRuntime {
     if (this.bots.has(botId)) return this.bots.get(botId)!;
-    const instance = new Zalo({ selfListen: true, logging: true });
+
+    console.log(`[BotManager] Khởi tạo instance Zalo mới cho ${botId}`);
+    const instance = new Zalo({
+      selfListen: true,
+      logging: true,
+    });
+
     const runtime = { instance, api: null, status: "STOPPED" as const };
     this.bots.set(botId, runtime);
     return runtime;
   }
 
-  /**
-   * [FLOW 1] Đăng nhập bằng QR
-   */
+  // --- LOGIN ACTIONS ---
+
   public async startLoginQR(botId: string) {
     const runtime = this.getOrInitBot(botId);
 
-    if (runtime.status === "LOGGED_IN") return;
+    if (runtime.status === "LOGGED_IN") {
+      console.log(`[BotManager] Bot ${botId} đã đăng nhập, bỏ qua QR.`);
+      return;
+    }
 
-    // Update DB: Chờ QR
     await this.updateBotStatusInDB(botId, "QR_WAITING");
     runtime.status = "QR_WAITING";
 
     try {
+      console.log(`[BotManager] Đang yêu cầu QR code cho ${botId}...`);
       const api = await runtime.instance.loginQR({}, async (qrData: any) => {
         let base64 = typeof qrData === "string" ? qrData : qrData.data?.image;
         if (base64 && !base64.startsWith("data:image"))
           base64 = `data:image/png;base64,${base64}`;
         await this.updateBotStatusInDB(botId, "QR_WAITING", undefined, base64);
       });
+
+      console.log(`[BotManager] QR Login thành công cho ${botId}.`);
       await this.handleLoginSuccess(botId, api);
     } catch (error: any) {
+      console.error(`[BotManager] QR Error (${botId}):`, error);
       runtime.status = "ERROR";
       await this.updateBotStatusInDB(botId, "ERROR", error.message);
     }
   }
 
-  /**
-   * [FLOW 2] Đăng nhập bằng Token (Hoặc Restore)
-   */
   public async loginWithCredentials(botId: string, credentials: any) {
     const runtime = this.getOrInitBot(botId);
     if (runtime.status === "LOGGED_IN") return { success: true };
 
+    console.log(`[BotManager] Login credential cho ${botId}...`);
     await this.updateBotStatusInDB(botId, "STARTING");
     runtime.status = "STARTING";
 
@@ -101,15 +129,18 @@ export class BotRuntimeManager {
       await this.handleLoginSuccess(botId, api);
       return { success: true };
     } catch (error: any) {
+      console.error(
+        `[BotManager] Login credential thất bại (${botId}):`,
+        error,
+      );
       runtime.status = "ERROR";
       await this.updateBotStatusInDB(botId, "ERROR", error.message);
       throw error;
     }
   }
 
-  /**
-   * [UPDATED] Xử lý login thành công với cơ chế Atomic Update
-   */
+  // --- CORE HANDLER ---
+
   private async handleLoginSuccess(botId: string, api: API) {
     const runtime = this.bots.get(botId);
     if (!runtime) return;
@@ -120,27 +151,87 @@ export class BotRuntimeManager {
       } catch {}
     }
 
-    // Gán API mới
     runtime.api = api;
     runtime.status = "LOGGED_IN";
 
-    console.log(`[BotManager] Bot ${botId} -> LOGGED IN. Fetching Profile...`);
+    console.log(
+      `[BotManager] Bot ${botId} -> LOGGED IN. Bắt đầu lấy Profile...`,
+    );
 
-    // 1. Fetch Profile info TRƯỚC
-    let profileUpdate = {};
+    // [FIX] Logic lấy và parse thông tin tài khoản
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let profileUpdate: any = {};
+
     try {
-      const info: any = await api.fetchAccountInfo();
+      // 1. Gọi API
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let infoResponse: any = await api.fetchAccountInfo();
+
+      // 2. [QUAN TRỌNG] Kiểm tra xem có phải chuỗi không -> Parse JSON
+      if (typeof infoResponse === "string") {
+        console.log("[BotManager] Response là string, đang parse JSON...");
+        try {
+          infoResponse = JSON.parse(infoResponse);
+        } catch (parseErr) {
+          console.error("[BotManager] Lỗi Parse JSON profile:", parseErr);
+        }
+      }
+
+      console.log(
+        `[BotManager] Response Object Keys:`,
+        Object.keys(infoResponse || {}),
+      );
+
+      // 3. Trích xuất Profile Object (Ưu tiên 'profile' theo log thực tế)
+      const profile = infoResponse.profile || infoResponse.data || infoResponse;
+
+      if (!profile) {
+        console.warn(
+          "[BotManager] Không tìm thấy object profile trong response!",
+        );
+      } else {
+        console.log(
+          `[BotManager] Extracted Profile: name="${profile.displayName}", id="${profile.userId}"`,
+        );
+      }
+
+      // 4. Fallback ID
+      const globalId =
+        profile?.userId || profile?.id || profile?.uid || api.getOwnId();
+
+      console.log(`[BotManager] Final Global ID: ${globalId}`);
+
+      // 5. Construct Payload
       profileUpdate = {
-        global_id: info.userId || info.id || info.uid,
-        name: info.displayName || info.zaloName || info.name || "Zalo Bot",
-        avatar: info.avatar || info.img || info.picture || "",
-        phone: info.phone || info.phoneNumber || null,
+        global_id: globalId,
+        name:
+          profile?.displayName ||
+          profile?.zaloName ||
+          profile?.name ||
+          `Zalo User ${globalId}`,
+        avatar:
+          profile?.avatar ||
+          profile?.img ||
+          profile?.picture ||
+          profile?.bgAvatar ||
+          "",
+        phone: profile?.phoneNumber || profile?.phone || null,
       };
-    } catch (e) {
-      console.warn("[BotManager] Failed to fetch profile:", e);
+    } catch (e: any) {
+      console.warn(
+        "[BotManager] Failed to fetch full profile (using fallback):",
+        e.message,
+      );
+      const fallbackId = api.getOwnId();
+      profileUpdate = {
+        global_id: fallbackId,
+        name: `Zalo Bot ${fallbackId}`,
+      };
     }
 
-    // 2. Prepare Credentials
+    console.log(`[BotManager] Payload update DB:`, profileUpdate);
+
+    // 6. Update DB
     const context = api.getContext();
     const credentials = {
       cookie: context.cookie,
@@ -148,34 +239,44 @@ export class BotRuntimeManager {
       userAgent: context.userAgent,
     };
 
-    // 3. ATOMIC UPDATE: Cập nhật TẤT CẢ (Status + Profile + Token) trong 1 lệnh
-    // Điều này đảm bảo khi UI nhận được event UPDATE, data đã đầy đủ.
-    await supabase
-      .from("zalo_bots")
-      .update({
-        ...profileUpdate,
-        access_token: credentials,
-        is_active: true,
-        status: {
-          state: "LOGGED_IN",
-          last_login: new Date().toISOString(),
-          error_message: null,
-          qr_code: null,
-        },
-      })
-      .eq("id", botId);
+    try {
+      const { error } = await supabase
+        .from("zalo_bots")
+        .update({
+          ...profileUpdate,
+          access_token: credentials,
+          is_active: true,
+          status: {
+            state: "LOGGED_IN",
+            last_login: new Date().toISOString(),
+            error_message: null,
+            qr_code: null,
+          },
+        })
+        .eq("id", botId);
 
-    // 4. Start Listener
+      if (error) {
+        console.error("[BotManager] DB Update Error:", error);
+      } else {
+        console.log("[BotManager] DB Update Success.");
+      }
+    } catch (dbErr) {
+      console.error("[BotManager] DB Update Exception:", dbErr);
+    }
+
     this.setupMessageListener(botId, api);
   }
 
   private setupMessageListener(botId: string, api: API) {
-    // Không gọi api.listener.off vì api mới tinh
+    console.log(`[BotManager] Starting message listener for ${botId}...`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     api.listener.on("message", async (message: any) => {
-      // Đẩy vào Pipeline
       await this.messagePipeline.process(botId, message);
     });
-
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    api.listener.on("error", (err: any) => {
+      console.error(`[BotManager] Listener Error (${botId}):`, err);
+    });
     api.listener.start();
   }
 
@@ -199,8 +300,16 @@ export class BotRuntimeManager {
 
   public getBotAPI(botId: string): API {
     const runtime = this.bots.get(botId);
-    if (!runtime || !runtime.api)
-      throw new Error(`Bot ${botId} chưa sẵn sàng.`);
+    if (!runtime) {
+      throw new Error(
+        `Bot ${botId} chưa được khởi tạo. Vui lòng refresh hoặc login lại.`,
+      );
+    }
+    if (!runtime.api) {
+      throw new Error(
+        `Bot ${botId} chưa sẵn sàng (Status: ${runtime.status}). Đang kết nối...`,
+      );
+    }
     return runtime.api;
   }
 
