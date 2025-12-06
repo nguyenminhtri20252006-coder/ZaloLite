@@ -1,10 +1,10 @@
 import { redirect } from "next/navigation";
 
 /**
- * Trang gốc (Root): Tự động chuyển hướng.
- * - Nếu chưa đăng nhập -> Middleware/Layout sẽ đá về /login.
- * - Nếu đã đăng nhập -> Vào thẳng dashboard.
+ * Trang gốc (Root):
+ * Theo yêu cầu mới: Mặc định chuyển hướng về trang đăng nhập (/login).
+ * Người dùng sẽ chỉ vào được Dashboard sau khi đăng nhập thành công.
  */
 export default function RootPage() {
-  redirect("/dashboard");
+  redirect("/login");
 }

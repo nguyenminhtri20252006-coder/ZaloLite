@@ -10,10 +10,10 @@ const API_URL = "http://localhost:3000/api/system/setup-admin";
 
 // --- CẤU HÌNH TÀI KHOẢN ADMIN MONG MUỐN ---
 const ADMIN_CONFIG = {
-  username: "admin",          // Tên đăng nhập
-  password: "admin123@Password", // Mật khẩu (Nên đặt mạnh hơn)
+  username: "admin", // Tên đăng nhập
+  password: "admin123", // Mật khẩu (Nên đặt mạnh hơn)
   fullName: "System Administrator",
-  secret: "zalolite-setup-secret-2024" // Khớp với file API route
+  secret: "zalolite-setup-secret-2024", // Khớp với file API route
 };
 
 async function runSetup() {
@@ -36,7 +36,9 @@ async function runSetup() {
       console.log("\n✅ THÀNH CÔNG!");
       console.log("   Thông tin tài khoản đã được lưu vào Database.");
       console.log("   ID:", result.data.id);
-      console.log("\n👉 Bạn có thể đăng nhập ngay tại: http://localhost:3000/login");
+      console.log(
+        "\n👉 Bạn có thể đăng nhập ngay tại: http://localhost:3000/login",
+      );
     } else {
       console.error("\n❌ THẤT BẠI:", result.error);
     }

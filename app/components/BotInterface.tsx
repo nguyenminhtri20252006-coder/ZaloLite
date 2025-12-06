@@ -13,6 +13,7 @@ import { ConversationList } from "./modules/ConversationList";
 import { ChatFrame } from "./modules/ChatFrame";
 import { DetailsPanel } from "./modules/DetailsPanel";
 import { BotLoginManager } from "./modules/BotLoginManager";
+import { ManagementPanel } from "./modules/ManagementPanel"; // [NEW] Import ManagementPanel
 import { getBotsAction } from "../../lib/actions/bot.actions";
 import {
   getThreadsFromDBAction, // Dùng action mới từ DB
@@ -271,6 +272,11 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     t.name.toLowerCase().includes(searchTerm.toLowerCase()),
   );
 
+  // [NEW] Hàm giả lập Scan (Nếu chưa implement logic scan thật)
+  const handleStartScan = () => {
+    console.log("Start scanning...");
+  };
+
   return (
     <div
       className="flex h-screen w-full overflow-hidden bg-gray-900 font-sans text-gray-100"
@@ -305,6 +311,20 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
             activeQrBotId={activeQrBotId}
             qrCodeData={qrCodeData}
             onSetActiveQrBotId={setActiveQrBotId}
+          />
+        )}
+
+        {/* [NEW] CRM VIEW */}
+        {currentView === "crm" && (
+          <ManagementPanel
+            botId={activeBotIdForChat}
+            selectedThread={selectedThread}
+            threads={threads}
+            onRefreshThreads={fetchThreads}
+            userCache={userCache}
+            onStartManualScan={handleStartScan}
+            isScanningAll={false}
+            scanStatus="Idle"
           />
         )}
 

@@ -19,11 +19,22 @@ import {
   CustomerCRMView,
 } from "@/lib/actions/crm.actions";
 import { syncBotDataAction } from "@/lib/actions/bot.actions";
+import { ThreadInfo, UserCacheEntry } from "@/lib/types/zalo.types"; // [NEW] Import Types
 
 export function UserDatabasePanel({
-  botId, // Cần botId để load data
+  botId,
+  userCache, // [NEW]
+  threads, // [NEW]
+  onStartManualScan, // [NEW]
+  isScanningAll, // [NEW]
+  scanStatus, // [NEW]
 }: {
   botId: string | null;
+  userCache?: Record<string, UserCacheEntry>;
+  threads?: ThreadInfo[];
+  onStartManualScan?: () => void;
+  isScanningAll?: boolean;
+  scanStatus?: string;
 }) {
   const [customers, setCustomers] = useState<CustomerCRMView[]>([]);
   const [isLoading, setIsLoading] = useState(false);

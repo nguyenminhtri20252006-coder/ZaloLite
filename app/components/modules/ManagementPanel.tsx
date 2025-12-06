@@ -460,6 +460,7 @@ function CreateGroupPanel({
 
 // SỬA ĐỔI (GĐ 3.7): Nhận props và lọc danh sách bạn bè
 export function ManagementPanel({
+  botId, // [NEW] Nhận botId từ BotInterface
   selectedThread,
   threads,
   onRefreshThreads,
@@ -469,6 +470,7 @@ export function ManagementPanel({
   isScanningAll,
   scanStatus,
 }: {
+  botId: string | null; // [NEW]
   selectedThread: ThreadInfo | null;
   threads: ThreadInfo[];
   onRefreshThreads: () => void;
@@ -527,6 +529,7 @@ export function ManagementPanel({
           <div className="h-full">
             {/* Tab Users: Chỉ hiển thị UserDatabasePanel full height */}
             <UserDatabasePanel
+              botId={botId} // [NEW] Truyền botId xuống
               userCache={userCache}
               threads={threads}
               onStartManualScan={onStartManualScan}
