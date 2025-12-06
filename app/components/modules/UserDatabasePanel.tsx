@@ -2,289 +2,267 @@
 
 /**
  * app/components/modules/UserDatabasePanel.tsx
- * [UPDATE] Giao diện bảng/lưới trực quan hơn.
+ * [UPDATED] Database-First CRM View.
+ * Hiển thị danh sách khách hàng từ DB, hỗ trợ chỉnh sửa Tag/Note.
  */
-import { useMemo, useState } from "react";
-import { UserCacheEntry, ThreadInfo } from "@/lib/types/zalo.types";
+import { useState, useEffect } from "react";
 import { Avatar } from "@/app/components/ui/Avatar";
 import {
   IconUsers,
   IconRefresh,
-  IconPhone,
-  IconCheck,
-  IconClose,
   IconSearch,
+  IconCheck,
 } from "@/app/components/ui/Icons";
-import { getRawUserInfoAction } from "@/lib/actions/debug.actions";
-import { JsonViewerModal } from "@/app/components/ui/JsonViewerModal";
-
-// Icon Code (cho nút Inspect)
-const IconCode = ({ className }: { className: string }) => (
-  <svg
-    xmlns="http://www.w3.org/2000/svg"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    className={className}
-  >
-    <path
-      fillRule="evenodd"
-      d="M3 6a3 3 0 013-3h2.25a3 3 0 013 3v2.25a3 3 0 01-3 3H6a3 3 0 01-3-3V6zm9.75 0a3 3 0 013-3H18a3 3 0 013 3v2.25a3 3 0 01-3 3h-2.25a3 3 0 01-3-3V6zM3 15.75a3 3 0 013-3h2.25a3 3 0 013 3V18a3 3 0 01-3 3H6a3 3 0 01-3-3v-2.25zm9.75 0a3 3 0 013-3H18a3 3 0 013 3V18a3 3 0 01-3 3h-2.25a3 3 0 01-3-3v-2.25z"
-      clipRule="evenodd"
-    />
-  </svg>
-);
+import {
+  getCustomersFromDBAction,
+  updateCustomerCRMAction,
+  CustomerCRMView,
+} from "@/lib/actions/crm.actions";
+import { syncBotDataAction } from "@/lib/actions/bot.actions";
 
 export function UserDatabasePanel({
-  userCache,
-  threads,
-  onStartManualScan,
-  isScanningAll,
-  scanStatus,
+  botId, // Cần botId để load data
 }: {
-  userCache: Record<string, UserCacheEntry>;
-  threads: ThreadInfo[];
-  onStartManualScan: () => void;
-  isScanningAll: boolean;
-  scanStatus: string;
+  botId: string | null;
 }) {
+  const [customers, setCustomers] = useState<CustomerCRMView[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [filter, setFilter] = useState<"all" | "friend" | "stranger">("all");
 
-  // State cho JSON Viewer
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [inspectData, setInspectData] = useState<any>(null);
-  const [inspectTitle, setInspectTitle] = useState("");
-  const [isLoadingInspect, setIsLoadingInspect] = useState(false);
+  // State Edit CRM
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editNote, setEditNote] = useState("");
+  const [editTags, setEditTags] = useState("");
 
-  const cachedUsers = useMemo(() => {
-    let users = Object.values(userCache);
-
-    // 1. Filter
-    if (filter === "friend") users = users.filter((u) => u.isFriend);
-    if (filter === "stranger") users = users.filter((u) => !u.isFriend);
-
-    // 2. Search
-    if (searchTerm) {
-      const lower = searchTerm.toLowerCase();
-      users = users.filter(
-        (u) =>
-          u.name.toLowerCase().includes(lower) ||
-          u.id.includes(lower) ||
-          (u.phoneNumber && u.phoneNumber.includes(lower)),
-      );
-    }
-    return users;
-  }, [userCache, searchTerm, filter]);
-
-  // SỬA ĐỔI: Thêm tham số phoneNumber
-  const handleInspect = async (
-    userId: string,
-    userName: string,
-    phoneNumber?: string | null,
-  ) => {
-    if (isLoadingInspect) return;
-    setIsLoadingInspect(true);
+  // --- DATA FETCHING ---
+  const fetchData = async () => {
+    if (!botId) return;
+    setIsLoading(true);
     try {
-      // Gọi Action với cả ID và Phone
-      const result = await getRawUserInfoAction(userId, phoneNumber);
-      setInspectTitle(`${userName} (${userId})`);
-      setInspectData(result);
-    } catch (error) {
-      setInspectTitle("Error");
-      setInspectData({ error: "Failed to fetch data" });
+      const data = await getCustomersFromDBAction(botId, 100, 1, searchTerm);
+      setCustomers(data);
+    } catch (e) {
+      console.error(e);
     } finally {
-      setIsLoadingInspect(false);
+      setIsLoading(false);
     }
   };
 
+  useEffect(() => {
+    fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [botId]); // Reload khi đổi bot
+
+  const handleSearch = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") fetchData();
+  };
+
+  const handleSync = async () => {
+    if (!botId) return;
+    setIsSyncing(true);
+    try {
+      await syncBotDataAction(botId);
+      setTimeout(fetchData, 2000); // Đợi sync xong rồi reload nhẹ
+    } catch (e) {
+      alert("Lỗi đồng bộ");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  // --- CRM ACTIONS ---
+  const startEdit = (c: CustomerCRMView) => {
+    setEditingId(c.id);
+    setEditNote(c.notes || "");
+    setEditTags(c.tags?.join(", ") || "");
+  };
+
+  const saveEdit = async () => {
+    if (!editingId) return;
+
+    // Parse tags
+    const tagsArray = editTags
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t);
+
+    const res = await updateCustomerCRMAction(editingId, {
+      notes: editNote,
+      tags: tagsArray,
+    });
+
+    if (res.success) {
+      setCustomers((prev) =>
+        prev.map((c) =>
+          c.id === editingId ? { ...c, notes: editNote, tags: tagsArray } : c,
+        ),
+      );
+      setEditingId(null);
+    } else {
+      alert("Lỗi lưu: " + res.error);
+    }
+  };
+
+  if (!botId) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-gray-500">
+        <IconUsers className="w-12 h-12 mb-2 opacity-20" />
+        <p>Vui lòng chọn Bot để xem dữ liệu CRM.</p>
+      </div>
+    );
+  }
+
   return (
-    <>
-      {/* Modal Viewer */}
-      {inspectData && (
-        <JsonViewerModal
-          title={inspectTitle}
-          data={inspectData}
-          onClose={() => setInspectData(null)}
-        />
-      )}
-
-      <div className="flex flex-col h-full bg-gray-800 rounded-lg shadow-lg overflow-hidden border border-gray-700">
-        {/* Header */}
-        <div className="p-4 border-b border-gray-700 bg-gray-900">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-blue-900/30 rounded-lg">
-                <IconUsers className="h-6 w-6 text-blue-400" />
-              </div>
-              <div>
-                <h2 className="text-lg font-bold text-white leading-tight">
-                  Database Người Dùng
-                </h2>
-                <p className="text-xs text-gray-400 font-mono">
-                  {Object.keys(userCache).length} records cached
-                </p>
-              </div>
-            </div>
-
-            <button
-              onClick={onStartManualScan}
-              disabled={isScanningAll}
-              className={`flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all shadow-sm ${
-                isScanningAll
-                  ? "bg-yellow-600/20 text-yellow-400 cursor-not-allowed border border-yellow-600/30"
-                  : "bg-blue-600 text-white hover:bg-blue-500 hover:shadow-blue-500/20 active:scale-95"
-              }`}
-            >
-              <IconRefresh
-                className={`h-4 w-4 ${isScanningAll ? "animate-spin" : ""}`}
-              />
-              {isScanningAll ? "Đang quét..." : "Quét Groups"}
-            </button>
-          </div>
-
-          {scanStatus && (
-            <div className="mb-4 px-3 py-2 rounded bg-blue-900/20 border border-blue-800/50 text-xs text-blue-200 font-mono text-center animate-pulse">
-              {scanStatus}
-            </div>
-          )}
-
-          {/* Filters & Search */}
-          <div className="flex flex-col sm:flex-row gap-3">
-            <div className="relative flex-1 group">
-              <IconSearch className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500 group-focus-within:text-blue-400 transition-colors" />
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Tìm kiếm ID, Tên, SĐT..."
-                className="w-full rounded-lg border border-gray-600 bg-gray-800 py-2 pl-9 pr-3 text-white text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
-              />
-            </div>
-            <div className="flex bg-gray-700/50 rounded-lg p-1 border border-gray-600">
-              {(["all", "friend", "stranger"] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className={`flex-1 sm:flex-none px-4 py-1.5 rounded-md text-xs font-medium transition-all ${
-                    filter === f
-                      ? "bg-gray-600 text-white shadow-sm"
-                      : "text-gray-400 hover:text-gray-200 hover:bg-gray-600/50"
-                  }`}
-                >
-                  {f === "all"
-                    ? "Tất cả"
-                    : f === "friend"
-                    ? "Bạn bè"
-                    : "Người lạ"}
-                </button>
-              ))}
-            </div>
-          </div>
+    <div className="flex flex-col h-full bg-gray-900 text-gray-100">
+      {/* Header */}
+      <div className="p-6 border-b border-gray-800 bg-gray-900">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-2xl font-bold text-white">CRM Khách Hàng</h2>
+          <button
+            onClick={handleSync}
+            disabled={isSyncing}
+            className="flex items-center gap-2 px-3 py-2 bg-blue-900/30 text-blue-400 rounded-lg hover:bg-blue-900/50 text-sm transition-all"
+          >
+            <IconRefresh
+              className={`w-4 h-4 ${isSyncing ? "animate-spin" : ""}`}
+            />
+            {isSyncing ? "Đang đồng bộ..." : "Sync Zalo"}
+          </button>
         </div>
 
-        {/* Data Grid - Responsive Fix */}
-        <div className="flex-1 overflow-y-auto p-4 bg-gray-800/50">
-          <div
-            className="grid gap-3"
-            style={{
-              gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
-            }}
-          >
-            {cachedUsers.map((user) => (
+        {/* Search */}
+        <div className="relative">
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            onKeyDown={handleSearch}
+            placeholder="Tìm theo tên, SĐT... (Enter để tìm)"
+            className="w-full bg-gray-800 border border-gray-700 rounded-xl py-3 pl-10 pr-4 text-white focus:border-blue-500 focus:outline-none"
+          />
+          <IconSearch className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-500" />
+        </div>
+      </div>
+
+      {/* Grid Content */}
+      <div className="flex-1 overflow-y-auto p-6">
+        {isLoading ? (
+          <div className="flex justify-center mt-10">
+            <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+          </div>
+        ) : customers.length === 0 ? (
+          <div className="text-center text-gray-500 mt-10">
+            Không tìm thấy khách hàng nào.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {customers.map((c) => (
               <div
-                key={user.id}
-                className="group relative flex items-start gap-3 p-3 rounded-xl border border-gray-700 bg-gray-800 hover:bg-gray-750 hover:border-gray-600 transition-all duration-200 hover:shadow-md"
+                key={c.id}
+                className="bg-gray-800 border border-gray-700 rounded-xl p-4 hover:border-gray-600 transition-all shadow-sm flex flex-col"
               >
-                {/* Avatar */}
-                <div className="relative shrink-0">
-                  <Avatar src={user.avatar} alt={user.name} />
-                  {user.isFriend && (
-                    <div
-                      className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-0.5 border-2 border-gray-800"
-                      title="Là bạn bè"
-                    >
-                      <IconCheck className="h-2.5 w-2.5 text-white" />
-                    </div>
-                  )}
+                {/* Info Header */}
+                <div className="flex items-start gap-3 mb-3">
+                  <Avatar src={c.avatar || ""} alt={c.display_name || ""} />
+                  <div className="flex-1 min-w-0">
+                    <h3 className="font-bold text-white truncate">
+                      {c.display_name}
+                    </h3>
+                    <p className="text-xs text-gray-400 font-mono truncate">
+                      {c.global_id}
+                    </p>
+                    {c.phone && (
+                      <p className="text-xs text-yellow-500 mt-0.5">
+                        {c.phone}
+                      </p>
+                    )}
+                  </div>
                 </div>
 
-                {/* Info */}
-                <div className="flex-1 min-w-0 overflow-hidden">
-                  <div className="flex justify-between items-start gap-2">
-                    <h4
-                      className="font-semibold text-white truncate text-sm group-hover:text-blue-400 transition-colors"
-                      title={user.name}
-                    >
-                      {user.name}
-                    </h4>
-                    {/* Actions Row */}
-                    <div className="flex gap-1">
+                {/* CRM Edit Area */}
+                {editingId === c.id ? (
+                  <div className="flex-1 flex flex-col gap-2 animate-fade-in">
+                    <input
+                      value={editTags}
+                      onChange={(e) => setEditTags(e.target.value)}
+                      placeholder="Tags (cách nhau dấu phẩy)"
+                      className="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-white"
+                    />
+                    <textarea
+                      value={editNote}
+                      onChange={(e) => setEditNote(e.target.value)}
+                      placeholder="Ghi chú..."
+                      rows={2}
+                      className="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-white resize-none"
+                    />
+                    <div className="flex gap-2 justify-end mt-1">
                       <button
-                        onClick={() =>
-                          handleInspect(user.id, user.name, user.phoneNumber)
-                        }
-                        disabled={isLoadingInspect}
-                        className="p-1 rounded bg-gray-700 hover:bg-blue-600 text-gray-400 hover:text-white transition-colors"
-                        title="Xem Full JSON"
+                        onClick={() => setEditingId(null)}
+                        className="text-xs text-gray-400 hover:text-white"
                       >
-                        <IconCode className="h-3 w-3" />
+                        Huỷ
                       </button>
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded border uppercase font-bold tracking-wider ${
-                          user.isFriend
-                            ? "border-green-800 bg-green-900/20 text-green-400"
-                            : "border-gray-600 bg-gray-700/50 text-gray-500"
-                        }`}
+                      <button
+                        onClick={saveEdit}
+                        className="text-xs bg-blue-600 px-2 py-1 rounded text-white font-bold"
                       >
-                        {user.isFriend ? "Friend" : "Guest"}
-                      </span>
+                        Lưu
+                      </button>
                     </div>
                   </div>
-
-                  <div className="mt-2 space-y-1.5">
-                    <div
-                      className="flex items-center gap-2 text-xs text-gray-500 bg-gray-900/50 p-1 rounded hover:bg-gray-900 transition-colors cursor-copy"
-                      title="Click để copy ID"
-                      onClick={() => navigator.clipboard.writeText(user.id)}
-                    >
-                      <span className="font-mono select-all truncate">
-                        {user.id}
-                      </span>
+                ) : (
+                  <div
+                    className="flex-1 flex flex-col gap-2"
+                    onClick={() => startEdit(c)}
+                  >
+                    {/* Tags Display */}
+                    <div className="flex flex-wrap gap-1 min-h-[20px]">
+                      {c.tags && c.tags.length > 0 ? (
+                        c.tags.map((tag, idx) => (
+                          <span
+                            key={idx}
+                            className="px-2 py-0.5 rounded-full bg-blue-900/30 border border-blue-800 text-[10px] text-blue-300"
+                          >
+                            #{tag}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-[10px] text-gray-600 italic border border-dashed border-gray-700 px-2 rounded">
+                          + Thêm tag
+                        </span>
+                      )}
                     </div>
 
-                    {user.phoneNumber && (
-                      <div className="flex items-center gap-2 text-xs text-yellow-300/90">
-                        <IconPhone className="h-3 w-3" />
-                        <span className="font-mono select-all tracking-wide">
-                          {user.phoneNumber}
-                        </span>
-                      </div>
-                    )}
-
-                    {user.commonGroups.size > 0 && (
-                      <div className="flex items-center gap-2 text-xs text-blue-300/90">
-                        <IconUsers className="h-3 w-3" />
-                        <span className="truncate">
-                          {user.commonGroups.size} nhóm chung
-                        </span>
-                      </div>
-                    )}
+                    {/* Notes Display */}
+                    <div className="bg-gray-900/50 rounded p-2 min-h-[40px] cursor-text hover:bg-gray-900 transition-colors">
+                      {c.notes ? (
+                        <p className="text-xs text-gray-300 line-clamp-3">
+                          {c.notes}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-gray-600 italic">
+                          Chưa có ghi chú...
+                        </p>
+                      )}
+                    </div>
                   </div>
+                )}
+
+                <div className="mt-3 pt-3 border-t border-gray-700/50 flex justify-between items-center">
+                  <span className="text-[10px] text-gray-500">
+                    Tương tác:{" "}
+                    {c.last_interaction
+                      ? new Date(c.last_interaction).toLocaleDateString()
+                      : "Chưa rõ"}
+                  </span>
+                  {/* Có thể thêm nút Chat nhanh ở đây */}
                 </div>
               </div>
             ))}
           </div>
-
-          {cachedUsers.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-gray-500 gap-3 min-h-[200px]">
-              <div className="p-4 bg-gray-800 rounded-full border border-gray-700">
-                <IconUsers className="h-8 w-8 opacity-20" />
-              </div>
-              <p className="text-sm">Không tìm thấy dữ liệu phù hợp.</p>
-            </div>
-          )}
-        </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }

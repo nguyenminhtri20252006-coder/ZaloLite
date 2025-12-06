@@ -24,6 +24,54 @@ function getBotAPI(botId: string) {
     throw new Error(`Lỗi Bot (${botId}): ${err}`);
   }
 }
+/**
+ * [NEW] Lấy danh sách hội thoại từ Database (Unified Architecture).
+ * Logic: Lấy các conversation mà botId này có trong bảng mapping.
+ * Sắp xếp theo: last_activity_at (mới nhất lên đầu).
+ */
+export async function getThreadsFromDBAction(
+  botId: string,
+): Promise<ThreadInfo[]> {
+  if (!botId) return [];
+
+  try {
+    // 1. Lấy danh sách Conversation UUID mà bot này tham gia
+    const { data: mappings, error: mapError } = await supabase
+      .from("zalo_conversation_mappings")
+      .select("conversation_id")
+      .eq("bot_id", botId);
+
+    if (mapError) throw new Error(mapError.message);
+    if (!mappings || mappings.length === 0) return [];
+
+    const conversationIds = mappings.map((m) => m.conversation_id);
+
+    // 2. Query bảng conversations chi tiết, sắp xếp theo thời gian hoạt động
+    const { data: conversations, error: convError } = await supabase
+      .from("conversations")
+      .select("*")
+      .in("id", conversationIds)
+      .order("last_activity_at", { ascending: false });
+
+    if (convError) throw new Error(convError.message);
+
+    // 3. Map về định dạng ThreadInfo cho UI
+    const threads: ThreadInfo[] = conversations.map((conv) => ({
+      // UI sử dụng global_id (Zalo ID) làm khóa chính để tương tác API
+      id: conv.global_id,
+      name: conv.name || `Hội thoại ${conv.global_id}`,
+      avatar: conv.avatar || "",
+      type: conv.type === "group" ? 1 : 0,
+      // Thêm thông tin bổ sung nếu cần hiển thị preview
+      lastActivity: conv.last_activity_at,
+    }));
+
+    return threads;
+  } catch (error: unknown) {
+    console.error("[ChatAction] getThreadsFromDB Error:", error);
+    return [];
+  }
+}
 
 /**
  * Lấy danh sách hội thoại của Bot.
@@ -103,7 +151,7 @@ export async function getMessagesAction(botId: string, threadId: string) {
       const isSelf = msg.sender_type === "staff_on_bot";
 
       return {
-        type: 0, // UI không quan trọng type này lắm
+        type: 0,
         threadId: threadId,
         isSelf: isSelf,
         data: {
@@ -146,33 +194,34 @@ export async function sendMessageAction(
     // Fallback nếu api không trả msgId ngay lập tức
     const zaloMsgId = result.msgId || result.id || `sent_${Date.now()}`;
 
-    // 2. Đảm bảo Conversation & Mapping tồn tại trong DB
-    // (Quan trọng: Nếu bot chưa từng sync nhóm này, giờ phải tạo ngay)
+    // 2. Đảm bảo Conversation & Mapping tồn tại
     const conversationUUID = await ConversationService.ensureConversation(
       botId,
       threadId,
       isGroup,
-      "Unknown Conversation", // Tên tạm
+      "Unknown Conversation",
     );
 
     if (conversationUUID) {
-      // 3. Lưu tin nhắn vào DB ngay lập tức
-      // Bot hiện tại là bot_id trong mảng bot_ids
+      // 3. Lưu tin nhắn vào DB
       const { error } = await supabase.from("messages").insert({
         conversation_id: conversationUUID,
         sender_type: "staff_on_bot",
-        sender_id: botId, // Về mặt kỹ thuật Zalo, Bot là người gửi
-        staff_id: staffId, // Ghi nhận nhân viên thực hiện
-
-        bot_ids: [botId], // Bot này gửi -> Bot này thấy
+        sender_id: botId,
+        staff_id: staffId,
+        bot_ids: [botId],
         zalo_msg_id: String(zaloMsgId),
-
-        content: { type: "text", text: content }, // Normalized
-        raw_content: result, // Lưu response API làm raw data
+        content: { type: "text", text: content },
+        raw_content: result,
         msg_type: "text",
-
         sent_at: new Date().toISOString(),
       });
+
+      // 4. Update last_activity_at để Conversation nhảy lên đầu list
+      await supabase
+        .from("conversations")
+        .update({ last_activity_at: new Date().toISOString() })
+        .eq("id", conversationUUID);
 
       if (error)
         console.error(

@@ -204,6 +204,7 @@ export interface ThreadInfo {
   name: string;
   avatar: string;
   type: 0 | 1;
+  lastActivity?: string; // [FIX] Optional field for DB mode
 }
 
 export type UserCacheEntry = {
@@ -265,7 +266,9 @@ export enum ThreadType {
 }
 
 export type LoginState = "IDLE" | "LOGGING_IN" | "LOGGED_IN" | "ERROR";
-export type ViewState = "chat" | "manage" | "setting";
+
+// [FIX] Update ViewState để hỗ trợ CRM
+export type ViewState = "chat" | "manage" | "setting" | "crm";
 
 // --- 6. EXPORTS & STANDARD TYPES ---
 

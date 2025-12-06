@@ -30,7 +30,7 @@ const IconRobot = ({ className }: { className: string }) => (
   </svg>
 );
 
-// Component TabButton
+// Component TabButton & ActionButton (Giữ nguyên)
 const TabButton = ({
   icon: Icon,
   label,
@@ -68,7 +68,6 @@ const TabButton = ({
   </button>
 );
 
-// Component ActionButton
 const ActionButton = ({
   icon: Icon,
   label,
@@ -103,7 +102,7 @@ const ActionButton = ({
 );
 
 export function MainMenu({
-  staffInfo, // Thay thế accountInfo
+  staffInfo,
   isExpanded,
   onToggleMenu,
   currentView,
@@ -172,9 +171,18 @@ export function MainMenu({
 
         <TabButton
           icon={IconChatBubble}
-          label="Live Chat (CRM)"
+          label="Live Chat"
           isActive={currentView === "chat"}
           onClick={() => onChangeView("chat")}
+          isExpanded={isExpanded}
+        />
+
+        {/* [NEW] CRM Menu Item */}
+        <TabButton
+          icon={IconUsers}
+          label="CRM Khách Hàng"
+          isActive={currentView === "crm"}
+          onClick={() => onChangeView("crm")}
           isExpanded={isExpanded}
         />
       </div>
