@@ -28,7 +28,7 @@ export class MediaService {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Referer: "[https://chat.zalo.me/](https://chat.zalo.me/)",
+          Referer: "https://chat.zalo.me/",
         },
       });
 
@@ -40,8 +40,9 @@ export class MediaService {
 
       const arrayBuffer = await response.arrayBuffer();
       return Buffer.from(arrayBuffer);
-    } catch (error) {
-      console.error(`[MediaService] Download failed for ${url}:`, error);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error.message : String(error);
+      console.error(`[MediaService] Download failed for ${url}:`, err);
       throw error;
     }
   }
@@ -56,9 +57,9 @@ export class MediaService {
         width: metadata.width || 0,
         height: metadata.height || 0,
         size: metadata.size || buffer.length,
-        format: metadata.format,
+        format: metadata.format || "unknown",
       };
-    } catch (error) {
+    } catch (error: unknown) {
       console.error("[MediaService] Sharp error:", error);
       // Fallback an toàn nếu lỗi
       return { width: 0, height: 0, size: buffer.length, format: "unknown" };

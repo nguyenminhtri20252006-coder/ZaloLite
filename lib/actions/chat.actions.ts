@@ -1,9 +1,11 @@
-"use server";
-
 /**
  * lib/actions/chat.actions.ts
- * [REFACTORED] Hỗ trợ Multi-Bot thông qua BotRuntimeManager.
+ * [SERVER ACTIONS - V2]
+ * Logic giao tiếp UI <-> DB/API cho Chat.
+ * Updated: Tương thích với Consolidated Database v2.0.
  */
+
+"use server";
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
 import { ThreadInfo, ThreadType } from "@/lib/types/zalo.types";
@@ -17,13 +19,16 @@ import { ConversationService } from "@/lib/core/services/conversation-service";
 function getBotAPI(botId: string) {
   try {
     return BotRuntimeManager.getInstance().getBotAPI(botId);
-  } catch (e: any) {
-    throw new Error(`Lỗi Bot (${botId}): ${e.message}`);
+  } catch (e: unknown) {
+    const err = e instanceof Error ? e.message : String(e);
+    throw new Error(`Lỗi Bot (${botId}): ${err}`);
   }
 }
 
 /**
- * Lấy danh sách hội thoại của Bot
+ * Lấy danh sách hội thoại của Bot.
+ * TODO: Trong tương lai nên query từ DB (bảng conversations + mappings) để nhanh hơn.
+ * Hiện tại vẫn gọi API Zalo trực tiếp để có dữ liệu real-time nhất cho demo.
  */
 export async function getThreadsAction(botId: string): Promise<ThreadInfo[]> {
   if (!botId) return [];
@@ -31,13 +36,15 @@ export async function getThreadsAction(botId: string): Promise<ThreadInfo[]> {
   try {
     const api = getBotAPI(botId);
 
-    // Gọi song song lấy bạn bè và nhóm
-    const [friends, rawGroupsData] = await Promise.all([
+    // Gọi song song lấy bạn bè và nhóm từ Zalo API
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [friends, rawGroupsData]: [any, any] = await Promise.all([
       api.getAllFriends(),
       api.getAllGroups(),
     ]);
 
     // Map Bạn bè
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const friendThreads: ThreadInfo[] = friends.map((u: any) => ({
       id: u.userId,
       name: u.displayName || u.zaloName || "Unknown",
@@ -49,74 +56,82 @@ export async function getThreadsAction(botId: string): Promise<ThreadInfo[]> {
     const groupIds = Object.keys(rawGroupsData.gridVerMap || {});
     const groupThreads: ThreadInfo[] = groupIds.map((gid) => ({
       id: gid,
-      name: `Group ${gid.slice(0, 6)}...`,
+      name: `Group ${gid.slice(0, 6)}...`, // Tên tạm, chi tiết sẽ load sau
       avatar: "",
       type: 1, // Group
     }));
 
-    // TODO: Implement batch getGroupInfo here for better UX
-
+    // Merge và trả về
     return [...friendThreads, ...groupThreads];
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("[ChatAction] getThreads Error:", error);
     return [];
   }
 }
 
 /**
- * [NEW] Lấy lịch sử tin nhắn từ DB
+ * [V2] Lấy lịch sử tin nhắn từ DB Hợp nhất.
+ * Logic: Tìm Conversation ID chung thông qua Mapping của Bot.
  */
 export async function getMessagesAction(botId: string, threadId: string) {
-  // 1. Tìm Conversation ID từ mapping
+  // 1. Tìm Conversation ID từ bảng Mapping (zalo_conversation_mappings)
   const { data: mapping } = await supabase
     .from("zalo_conversation_mappings")
     .select("conversation_id")
     .eq("bot_id", botId)
-    .eq("external_id", threadId)
+    .eq("external_thread_id", threadId)
     .single();
 
   if (!mapping) return [];
 
-  // 2. Query Messages
+  // 2. Query Messages thuộc Conversation ID này
+  // (Không cần filter bot_id nữa vì messages đã deduplicated,
+  // tuy nhiên nếu muốn strict mode chỉ hiện tin nhắn bot này "thấy" thì có thể filter bot_ids @> {botId})
   const { data: messages } = await supabase
     .from("messages")
     .select("*")
     .eq("conversation_id", mapping.conversation_id)
     .order("sent_at", { ascending: true })
-    .limit(50);
+    .limit(50); // Load 50 tin gần nhất
 
-  // 3. Map về format ZaloMessage cho UI dùng lại
+  // 3. Map về format ZaloMessage cho UI
   return (
-    messages?.map((msg) => ({
-      type: 0,
-      threadId: threadId,
-      isSelf: msg.sender_type === "staff_on_bot",
-      data: {
-        msgId: msg.zalo_msg_id,
-        cliMsgId: msg.zalo_msg_id, // <--- BỔ SUNG: Dùng msgId làm fallback
-        content: msg.content,
-        ts: new Date(msg.sent_at).getTime().toString(),
-        uidFrom: msg.sender_id,
-        dName: "",
-        msgType:
-          msg.content.type === "text" ? "webchat" : `chat.${msg.content.type}`,
-      },
-    })) || []
+    messages?.map((msg) => {
+      // Cast content an toàn
+      const contentObj = msg.content as Record<string, unknown>;
+      const msgTypeRaw = msg.msg_type || "text";
+      const isSelf = msg.sender_type === "staff_on_bot";
+
+      return {
+        type: 0, // UI không quan trọng type này lắm
+        threadId: threadId,
+        isSelf: isSelf,
+        data: {
+          msgId: msg.zalo_msg_id,
+          cliMsgId: msg.zalo_msg_id,
+          content: contentObj,
+          ts: new Date(msg.sent_at).getTime().toString(),
+          uidFrom: msg.sender_id,
+          dName: "", // Tên người gửi sẽ được UI resolve từ cache
+          msgType: msgTypeRaw === "text" ? "webchat" : `chat.${msgTypeRaw}`,
+        },
+      };
+    }) || []
   );
 }
 
 /**
- * [UPDATED] Gửi tin nhắn và Lưu DB kèm Staff ID
+ * [V2] Gửi tin nhắn và Lưu DB Hợp nhất
  */
 export async function sendMessageAction(
-  staffId: string, // [NEW] Nhận Staff ID
+  staffId: string,
   botId: string,
   content: string,
   threadId: string,
   type: ThreadType,
 ) {
   try {
-    const api = BotRuntimeManager.getInstance().getBotAPI(botId);
+    const api = getBotAPI(botId);
 
     // Inject API vào SenderService (nếu chưa có)
     const sender = SenderService.getInstance();
@@ -125,41 +140,52 @@ export async function sendMessageAction(
     const isGroup = type === ThreadType.Group;
 
     // 1. Gửi tin nhắn qua Zalo API
-    // Kết quả trả về thường chứa msgId (tùy version zca-js)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result: any = await sender.sendText(content, threadId, isGroup);
 
-    // Fallback nếu api không trả msgId ngay lập tức (dùng timestamp)
+    // Fallback nếu api không trả msgId ngay lập tức
     const zaloMsgId = result.msgId || result.id || `sent_${Date.now()}`;
 
-    // 2. Đảm bảo Conversation tồn tại trong DB
-    // (Vì có thể đây là lần đầu tiên bot chủ động nhắn tin cho khách)
+    // 2. Đảm bảo Conversation & Mapping tồn tại trong DB
+    // (Quan trọng: Nếu bot chưa từng sync nhóm này, giờ phải tạo ngay)
     const conversationUUID = await ConversationService.ensureConversation(
       botId,
       threadId,
       isGroup,
-      "Unknown Conversation",
+      "Unknown Conversation", // Tên tạm
     );
 
     if (conversationUUID) {
-      // 3. Lưu tin nhắn vào DB ngay lập tức (Ghi nhận Staff)
+      // 3. Lưu tin nhắn vào DB ngay lập tức
+      // Bot hiện tại là bot_id trong mảng bot_ids
       const { error } = await supabase.from("messages").insert({
         conversation_id: conversationUUID,
         sender_type: "staff_on_bot",
-        sender_id: botId, // Bot là người gửi (về mặt kỹ thuật)
-        staff_id: staffId, // [QUAN TRỌNG] Người bấm nút là Staff
-        content: { type: "text", text: content }, // Chuẩn hóa JSON content
-        zalo_msg_id: zaloMsgId,
+        sender_id: botId, // Về mặt kỹ thuật Zalo, Bot là người gửi
+        staff_id: staffId, // Ghi nhận nhân viên thực hiện
+
+        bot_ids: [botId], // Bot này gửi -> Bot này thấy
+        zalo_msg_id: String(zaloMsgId),
+
+        content: { type: "text", text: content }, // Normalized
+        raw_content: result, // Lưu response API làm raw data
+        msg_type: "text",
+
         sent_at: new Date().toISOString(),
       });
 
       if (error)
-        console.error("[ChatAction] Failed to save sent message:", error);
+        console.error(
+          "[ChatAction] Failed to save sent message:",
+          error.message,
+        );
     }
 
     return { success: true };
-  } catch (error: any) {
-    console.error("[ChatAction] Send Error:", error);
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error.message : String(error);
+    console.error("[ChatAction] Send Error:", err);
+    return { success: false, error: err };
   }
 }
 
@@ -179,23 +205,23 @@ export async function sendStickerAction(
       {
         id: stickerId,
         cateId: cateId,
-        type: 1, // <-- Added this field
+        type: 1,
       },
       threadId,
       type === ThreadType.Group ? 1 : 0,
     );
     return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  } catch (e: unknown) {
+    return {
+      success: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
 }
 
 /**
- * Bật/Tắt chế độ Echo (Bot nhại) - Lưu ý: Logic này nên chuyển vào DB hoặc Runtime State
- * Hiện tại tạm thời bỏ qua hoặc implement đơn giản.
+ * Set Echo State (Placeholder)
  */
 export async function setEchoBotStateAction(isEnabled: boolean) {
-  // Logic Echo Bot nên được gắn với từng Bot ID cụ thể trong RuntimeManager
-  // Hiện tại để trống để tránh lỗi build
   console.log("Set Echo State:", isEnabled);
 }

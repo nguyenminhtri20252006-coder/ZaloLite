@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-// Import tương đối chuẩn xác
 import {
   ThreadInfo,
   ViewState,
@@ -24,7 +23,6 @@ import { IconCog } from "./ui/Icons";
 import supabase from "../../lib/supabaseClient";
 
 type BotInterfaceProps = {
-  // [UPDATED] Thêm trường id vào type
   staffInfo: {
     id: string;
     name: string;
@@ -55,7 +53,6 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
   const [activeQrBotId, setActiveQrBotId] = useState<string | null>(null);
   const [qrCodeData, setQrCodeData] = useState<string | null>(null);
 
-  // Dummy states
   const [isEchoBotEnabled, setIsEchoBotEnabled] = useState(false);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
 
@@ -73,6 +70,7 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     try {
       const data = await getBotsAction();
       setBots(data);
+      // Auto select bot đầu tiên đang online nếu chưa chọn
       if (!activeBotIdForChat && data.length > 0) {
         const active = data.find((b) => b.status?.state === "LOGGED_IN");
         if (active) setActiveBotIdForChat(active.id);
@@ -86,37 +84,68 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     fetchBots();
   }, []);
 
-  // --- 2. SUPABASE REALTIME SUBSCRIPTION (BOT STATUS) ---
+  // --- 2. SUPABASE REALTIME (BOT STATUS & MESSAGES) ---
   useEffect(() => {
-    console.log("[Realtime] Subscribing to zalo_bots changes...");
+    console.log("[Realtime] Subscribing to events...");
 
     const channel = supabase
-      .channel("bot-status-updates")
+      .channel("global-changes")
+      // A. Lắng nghe trạng thái Bot
       .on(
         "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "zalo_bots" },
+        { event: "*", schema: "public", table: "zalo_bots" },
         (payload) => {
-          const updatedBot = payload.new as ZaloBot;
-          console.log("[Realtime] Bot Update:", updatedBot);
+          if (payload.eventType === "UPDATE") {
+            const updatedBot = payload.new as ZaloBot;
+            setBots((prev) =>
+              prev.map((b) => (b.id === updatedBot.id ? updatedBot : b)),
+            );
 
-          // Update List Bot Local
-          setBots((prev) =>
-            prev.map((b) => (b.id === updatedBot.id ? updatedBot : b)),
-          );
+            // Handle QR
+            if (updatedBot.id === activeQrBotId) {
+              // [FIXED] Xóa 'as any' vì updatedBot.status đã được định kiểu ZaloBotStatus
+              const statusData = updatedBot.status;
 
-          // Xử lý QR Code & Status riêng cho Bot đang active
-          if (updatedBot.id === activeQrBotId) {
-            const statusData = updatedBot.status as any;
-            if (statusData?.qr_code) {
-              setQrCodeData(statusData.qr_code);
+              if (statusData?.qr_code) setQrCodeData(statusData.qr_code);
+              if (
+                statusData?.state === "LOGGED_IN" ||
+                statusData?.state === "ERROR"
+              ) {
+                setActiveQrBotId(null);
+                setQrCodeData(null);
+              }
             }
-            if (
-              statusData?.state === "LOGGED_IN" ||
-              statusData?.state === "ERROR"
-            ) {
-              setActiveQrBotId(null);
-              setQrCodeData(null);
-            }
+          } else if (payload.eventType === "INSERT") {
+            setBots((prev) => [payload.new as ZaloBot, ...prev]);
+          }
+        },
+      )
+      // B. Lắng nghe Tin nhắn mới (Unified Table)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages" },
+        async (payload) => {
+          const newMsg = payload.new;
+          // Logic: Nếu tin nhắn mới thuộc Conversation đang mở -> Update UI
+          // Ở đây ta không có conversation_id trong state UI (chỉ có selectedThread.id = Global ID)
+          // Nên ta sẽ reload tin nhắn nếu user đang tương tác.
+          // [OPTIMIZATION]: Chỉ reload nếu user đang focus vào đúng thread.
+
+          // Tuy nhiên, vì ThreadID UI = GlobalID, còn DB dùng UUID, ta khó check trực tiếp.
+          // Giải pháp: Cứ reload nếu có active thread.
+          if (activeBotIdForChat && selectedThread) {
+            // Delay nhẹ để đảm bảo DB commit
+            setTimeout(async () => {
+              try {
+                const history = await getMessagesAction(
+                  activeBotIdForChat,
+                  selectedThread.id,
+                );
+                setMessages(history as ZaloMessage[]);
+              } catch (e) {
+                console.error(e);
+              }
+            }, 500);
           }
         },
       )
@@ -125,32 +154,16 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [activeQrBotId]);
+  }, [activeBotIdForChat, selectedThread, activeQrBotId]);
 
-  // Handle INSERT Bot
-  useEffect(() => {
-    const channel = supabase
-      .channel("bot-inserts")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "zalo_bots" },
-        (payload) => {
-          const newBot = payload.new as ZaloBot;
-          setBots((prev) => [newBot, ...prev]);
-        },
-      )
-      .subscribe();
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, []);
-
-  // --- 3. DATA FETCHING (THREADS) ---
+  // --- 3. FETCH THREADS ---
   useEffect(() => {
     const fetchThreads = async () => {
       if (!activeBotIdForChat) return;
       setIsLoadingThreads(true);
       try {
+        // [NOTE] Hiện tại getThreadsAction vẫn gọi Zalo API trực tiếp
+        // Trong tương lai nên chuyển sang query từ bảng conversations
         const data = await getThreadsAction(activeBotIdForChat);
         setThreads(data);
       } catch (e) {
@@ -164,55 +177,22 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     setMessages([]);
   }, [activeBotIdForChat]);
 
-  // --- 4. FETCH MESSAGES & REALTIME CHAT ---
-
-  // A. Load lịch sử tin nhắn khi chọn hội thoại
+  // --- 4. FETCH MESSAGES HISTORY ---
   useEffect(() => {
     const fetchMessages = async () => {
       if (!activeBotIdForChat || !selectedThread) return;
       try {
+        // Gọi action mới (query từ DB messages)
         const history = await getMessagesAction(
           activeBotIdForChat,
           selectedThread.id,
         );
-        // Typescript should be happy now as `history` has cliMsgId
         setMessages(history as ZaloMessage[]);
       } catch (e) {
         console.error("Load messages failed:", e);
       }
     };
     fetchMessages();
-  }, [activeBotIdForChat, selectedThread]);
-
-  // B. Lắng nghe tin nhắn mới từ DB (Realtime)
-  useEffect(() => {
-    if (!activeBotIdForChat || !selectedThread) return;
-
-    const channel = supabase
-      .channel("chat-messages")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages" },
-        async (payload) => {
-          console.log("[Realtime] New Message Inserted:", payload.new);
-          // Khi có tin nhắn mới, reload lại list message của thread hiện tại
-          // (Cách này đơn giản và đảm bảo dữ liệu đồng bộ nhất với DB pipeline)
-          try {
-            const history = await getMessagesAction(
-              activeBotIdForChat,
-              selectedThread.id,
-            );
-            setMessages(history as ZaloMessage[]);
-          } catch (e) {
-            console.error("Sync realtime message failed:", e);
-          }
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
   }, [activeBotIdForChat, selectedThread]);
 
   // --- HANDLERS ---
@@ -277,7 +257,7 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
 
       {/* CONTENT AREA */}
       <div className="flex-1 flex overflow-hidden relative bg-gray-800">
-        {/* VIEW: LOGIN */}
+        {/* VIEW: LOGIN & MANAGE */}
         {currentView === "manage" && (
           <BotLoginManager
             bots={bots}
@@ -323,13 +303,11 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
                 messages={messages}
                 onSendMessage={async (content) => {
                   if (activeBotIdForChat && selectedThread && staffInfo) {
-                    // Check staffInfo
-                    // console.log("Send:", content);
                     setIsSendingMessage(true);
                     try {
-                      // [UPDATED] Truyền staffInfo.id vào action
+                      // [UPDATED] Gửi kèm staffInfo.id
                       const res = await sendMessageAction(
-                        staffInfo.id, // <-- NEW param
+                        staffInfo.id,
                         activeBotIdForChat,
                         content,
                         selectedThread.id,
@@ -339,9 +317,9 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
                       if (!res.success) {
                         alert("Gửi tin nhắn thất bại: " + res.error);
                       }
-                      // Thành công thì không cần làm gì, Realtime sẽ tự update tin nhắn mới vào list
-                    } catch (err: any) {
-                      alert("Lỗi hệ thống: " + err.message);
+                      // Thành công thì không cần làm gì, Realtime sẽ tự update tin nhắn mới
+                    } catch (err: unknown) {
+                      alert("Lỗi hệ thống: " + String(err));
                     } finally {
                       setIsSendingMessage(false);
                     }

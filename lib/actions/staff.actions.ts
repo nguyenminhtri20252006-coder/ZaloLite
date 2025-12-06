@@ -1,9 +1,10 @@
-"use server";
-
 /**
  * lib/actions/staff.actions.ts
- * Business Logic cho Quản trị viên & Nhân viên (Auth, Permission, Audit).
+ * Business Logic cho Quản trị viên & Nhân viên.
+ * Updated: Payload session khớp với DB schema v2 (thêm avatar, phone).
  */
+
+"use server";
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
@@ -13,21 +14,22 @@ import {
   createSessionToken,
   verifySessionToken,
 } from "@/lib/utils/security";
-import { StaffAccount, BotPermissionType } from "@/lib/types/database.types";
+import { BotPermissionType } from "@/lib/types/database.types";
 
 const COOKIE_NAME = "staff_session";
 const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000; // 7 ngày
 
-// Định nghĩa cấu trúc Session Payload
+// [UPDATED] Session Payload đầy đủ hơn
 type SessionPayload = {
   id: string;
   username: string;
   role: string;
   full_name: string;
+  avatar?: string | null; // New
+  phone?: string | null; // New
   expiresAt: number;
 };
 
-// Định nghĩa State cho Form Login (Server Action)
 export type LoginState = {
   error?: string;
   success?: boolean;
@@ -48,7 +50,6 @@ export async function staffLoginAction(
   }
 
   try {
-    // 1. Tìm tài khoản trong DB
     const { data: staff } = await supabase
       .from("staff_accounts")
       .select("*")
@@ -59,26 +60,25 @@ export async function staffLoginAction(
       return { error: "Tài khoản không tồn tại hoặc đã bị khóa." };
     }
 
-    // 2. Kiểm tra mật khẩu
     const isValid = verifyPassword(password, staff.password_hash);
     if (!isValid) {
-      // Log failed attempt (Optional)
       return { error: "Mật khẩu không chính xác." };
     }
 
-    // 3. Tạo Session Token (Stateless)
+    // [UPDATED] Tạo Session Token với thông tin mở rộng
     const expiresAt = Date.now() + SESSION_DURATION;
     const payload: SessionPayload = {
       id: staff.id,
       username: staff.username,
       role: staff.role,
       full_name: staff.full_name,
+      avatar: staff.avatar,
+      phone: staff.phone,
       expiresAt,
     };
 
     const token = createSessionToken(payload);
 
-    // 4. Lưu Cookie
     const cookieStore = await cookies();
     cookieStore.set(COOKIE_NAME, token, {
       httpOnly: true,
@@ -88,23 +88,18 @@ export async function staffLoginAction(
       sameSite: "lax",
     });
 
-    // 5. Ghi Audit Log
     await createAuditLog(staff.id, "AUTH", "LOGIN", {
-      ip: "unknown", // Next.js Server Action khó lấy IP trực tiếp chuẩn xác
       method: "PASSWORD",
     });
-  } catch (error: any) {
-    console.error("Login Error:", error);
-    return { error: "Lỗi hệ thống: " + error.message };
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error.message : String(error);
+    console.error("Login Error:", err);
+    return { error: "Lỗi hệ thống: " + err };
   }
 
-  // Redirect phải ở ngoài try/catch
   redirect("/dashboard");
 }
 
-/**
- * ACTION: Đăng xuất
- */
 export async function staffLogoutAction() {
   const session = await getStaffSession();
 
@@ -117,9 +112,6 @@ export async function staffLogoutAction() {
   redirect("/login");
 }
 
-/**
- * HELPER: Lấy thông tin Session hiện tại (Dùng trong Server Component/Action)
- */
 export async function getStaffSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
@@ -128,7 +120,6 @@ export async function getStaffSession(): Promise<SessionPayload | null> {
 
   const payload = verifySessionToken<SessionPayload>(token);
 
-  // Kiểm tra hết hạn
   if (!payload || payload.expiresAt < Date.now()) {
     return null;
   }
@@ -136,15 +127,11 @@ export async function getStaffSession(): Promise<SessionPayload | null> {
   return payload;
 }
 
-/**
- * HELPER: Kiểm tra quyền hạn của Staff đối với một Bot cụ thể
- */
 export async function checkBotPermission(
   staffId: string,
   botId: string,
   requiredType: BotPermissionType,
 ): Promise<boolean> {
-  // Admin luôn có quyền
   const { data: staff } = await supabase
     .from("staff_accounts")
     .select("role")
@@ -153,7 +140,6 @@ export async function checkBotPermission(
 
   if (staff?.role === "admin") return true;
 
-  // Check bảng phân quyền
   const { data } = await supabase
     .from("staff_bot_permissions")
     .select("*")
@@ -163,12 +149,7 @@ export async function checkBotPermission(
 
   if (!data) return false;
 
-  // Logic phân cấp quyền
-  // view_only: Thấp nhất
-  // chat: Gửi tin
-  // auth: Cao nhất (Quản lý login)
-
-  if (requiredType === "view_only") return true; // Có row là xem được
+  if (requiredType === "view_only") return true;
   if (
     requiredType === "chat" &&
     (data.permission_type === "chat" || data.permission_type === "auth")
@@ -179,16 +160,12 @@ export async function checkBotPermission(
   return false;
 }
 
-/**
- * HELPER: Ghi Audit Log (Internal)
- */
 export async function createAuditLog(
   staffId: string | null,
   group: string,
   type: string,
-  payload: any,
+  payload: unknown,
 ) {
-  // Gọi trực tiếp Supabase hoặc RPC function đã tạo
   await supabase.from("audit_logs").insert({
     staff_id: staffId,
     action_group: group,

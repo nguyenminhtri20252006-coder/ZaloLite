@@ -1,6 +1,8 @@
 /**
  * lib/core/services/sender-service.ts
- * [FIX] Thêm log và xử lý lỗi chi tiết khi gửi tin
+ * [LAYER 3 - INFRASTRUCTURE]
+ * Wrapper gửi tin nhắn qua Zalo API.
+ * Updated: Type safe logging & Error handling.
  */
 
 import { API, ThreadType } from "zca-js";
@@ -25,7 +27,7 @@ export class SenderService {
 
   private getApi(): API {
     if (!this.api)
-      throw new Error("API instance chưa sẵn sàng (Chưa đăng nhập).");
+      throw new Error("API instance chưa sẵn sàng (Chưa đăng nhập/Inject).");
     return this.api;
   }
 
@@ -46,13 +48,12 @@ export class SenderService {
       const result = await api.sendMessage(content, threadId, type);
       console.log(`[Sender] Result:`, result);
       return result;
-    } catch (e: any) {
-      console.error(`[Sender] Failed to send text:`, e);
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e.message : String(e);
+      console.error(`[Sender] Failed to send text:`, err);
       throw e;
     }
   }
-
-  // ... (Các hàm sticker/image giữ nguyên nhưng thêm try/catch log tương tự)
 
   public async sendSticker(
     sticker: StandardSticker,
@@ -65,8 +66,9 @@ export class SenderService {
         threadId,
         this.getType(isGroup),
       );
-    } catch (e) {
-      console.error("[Sender] Send Sticker Error:", e);
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e.message : String(e);
+      console.error("[Sender] Send Sticker Error:", err);
       throw e;
     }
   }
@@ -77,9 +79,9 @@ export class SenderService {
     isGroup: boolean,
     caption: string = "",
   ) {
-    // ... (Giữ nguyên logic buffer)
     const api = this.getApi();
     const type = this.getType(isGroup);
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const message: any = {
       msg: caption || "",
@@ -91,15 +93,27 @@ export class SenderService {
         },
       ],
     };
-    return api.sendMessage(message, threadId, type);
+
+    try {
+      return await api.sendMessage(message, threadId, type);
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e.message : String(e);
+      console.error("[Sender] Send Image Error:", err);
+      throw e;
+    }
   }
 
   public async sendVoice(url: string, threadId: string, isGroup: boolean) {
-    return this.getApi().sendVoice(
-      { voiceUrl: url, ttl: 0 },
-      threadId,
-      this.getType(isGroup),
-    );
+    try {
+      return await this.getApi().sendVoice(
+        { voiceUrl: url, ttl: 0 },
+        threadId,
+        this.getType(isGroup),
+      );
+    } catch (e: unknown) {
+      console.error("[Sender] Send Voice Error:", e);
+      throw e;
+    }
   }
 
   public async sendVideo(
@@ -107,17 +121,22 @@ export class SenderService {
     threadId: string,
     isGroup: boolean,
   ) {
-    return this.getApi().sendVideo(
-      {
-        videoUrl: video.url,
-        thumbnailUrl: video.thumbnail,
-        duration: video.duration,
-        width: video.width,
-        height: video.height,
-        msg: "Video",
-      },
-      threadId,
-      this.getType(isGroup),
-    );
+    try {
+      return await this.getApi().sendVideo(
+        {
+          videoUrl: video.url,
+          thumbnailUrl: video.thumbnail,
+          duration: video.duration || 0,
+          width: video.width || 0,
+          height: video.height || 0,
+          msg: "Video",
+        },
+        threadId,
+        this.getType(isGroup),
+      );
+    } catch (e: unknown) {
+      console.error("[Sender] Send Video Error:", e);
+      throw e;
+    }
   }
 }

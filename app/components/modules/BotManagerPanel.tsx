@@ -7,12 +7,28 @@ import {
   IconUserPlus,
   IconCog,
   IconClose,
+  IconCheck,
 } from "@/app/components/ui/Icons";
 import { Avatar } from "@/app/components/ui/Avatar";
+import { syncBotDataAction } from "@/lib/actions/bot.actions";
 
-/**
- * Component hiển thị danh sách Bot và điều khiển trạng thái
- */
+// Icon Cloud Sync
+const IconCloudSync = ({ className }: { className: string }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+  >
+    <path
+      fillRule="evenodd"
+      d="M4.5 9.75a6 6 0 0111.573-2.226 3.75 3.75 0 014.133 4.303A4.5 4.5 0 0118 20.25H6.75a5.25 5.25 0 01-2.25-10.5zM2.25 15a6.75 6.75 0 006.75 6.75H18A6 6 0 0024 15.75c0-2.658-1.706-4.93-4.1-5.75a6.75 6.75 0 00-11.8-2.25A6.75 6.75 0 002.25 15z"
+      clipRule="evenodd"
+    />
+    <path d="M12 12.75a.75.75 0 01.75-.75h.008a.75.75 0 01.75.75v3.75a.75.75 0 01-.75.75h-.008a.75.75 0 01-.75-.75v-3.75z" />
+  </svg>
+);
+
 export function BotManagerPanel({
   bots,
   isLoading,
@@ -29,17 +45,36 @@ export function BotManagerPanel({
   onCreateBot: (name: string) => void;
   onDeleteBot: (id: string) => void;
   onStartLogin: (id: string) => void;
-  activeQrBotId: string | null; // ID của bot đang chờ quét QR
-  qrCodeData: string | null; // Dữ liệu ảnh QR
+  activeQrBotId: string | null;
+  qrCodeData: string | null;
 }) {
   const [isCreating, setIsCreating] = useState(false);
   const [newBotName, setNewBotName] = useState("");
+  // State quản lý loading Sync cho từng bot
+  const [syncingBotId, setSyncingBotId] = useState<string | null>(null);
 
   const handleCreateSubmit = () => {
     if (!newBotName.trim()) return;
     onCreateBot(newBotName);
     setNewBotName("");
     setIsCreating(false);
+  };
+
+  const handleSyncData = async (botId: string) => {
+    if (syncingBotId) return;
+    setSyncingBotId(botId);
+    try {
+      const res = await syncBotDataAction(botId);
+      if (res.success) {
+        alert(res.message);
+      } else {
+        alert("Lỗi đồng bộ: " + res.error);
+      }
+    } catch (e: unknown) {
+      alert("Lỗi hệ thống khi đồng bộ.");
+    } finally {
+      setSyncingBotId(null);
+    }
   };
 
   return (
@@ -49,7 +84,7 @@ export function BotManagerPanel({
         <div>
           <h1 className="text-2xl font-bold text-white">Quản lý Bot Zalo</h1>
           <p className="text-sm text-gray-400 mt-1">
-            Danh sách các tài khoản OA/Profile đang hoạt động ({bots.length})
+            Danh sách các tài khoản OA/Profile ({bots.length})
           </p>
         </div>
         <div className="flex gap-3">
@@ -72,7 +107,7 @@ export function BotManagerPanel({
         </div>
       </div>
 
-      {/* Form Tạo Bot Mới (Modal/Inline) */}
+      {/* Form Tạo Bot Mới */}
       {isCreating && (
         <div className="mb-6 p-4 bg-gray-800 rounded-xl border border-blue-500/30 animate-fade-in-down">
           <h3 className="text-sm font-bold text-blue-400 mb-2">
@@ -83,7 +118,7 @@ export function BotManagerPanel({
               type="text"
               value={newBotName}
               onChange={(e) => setNewBotName(e.target.value)}
-              placeholder="Đặt tên gợi nhớ cho Bot (Ví dụ: CSKH 01)..."
+              placeholder="Đặt tên gợi nhớ cho Bot..."
               className="flex-1 bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-blue-500"
               autoFocus
               onKeyDown={(e) => e.key === "Enter" && handleCreateSubmit()}
@@ -110,12 +145,6 @@ export function BotManagerPanel({
           <div className="col-span-full flex flex-col items-center justify-center h-64 text-gray-500 border-2 border-dashed border-gray-800 rounded-xl">
             <IconCog className="w-12 h-12 mb-4 opacity-20" />
             <p>Chưa có Bot nào được cấu hình.</p>
-            <button
-              onClick={() => setIsCreating(true)}
-              className="mt-4 text-blue-400 hover:underline"
-            >
-              Thêm bot đầu tiên ngay
-            </button>
           </div>
         )}
 
@@ -125,8 +154,10 @@ export function BotManagerPanel({
             bot={bot}
             onDelete={() => onDeleteBot(bot.id)}
             onLogin={() => onStartLogin(bot.id)}
+            onSync={() => handleSyncData(bot.id)}
             isQrActive={activeQrBotId === bot.id}
             qrCode={activeQrBotId === bot.id ? qrCodeData : null}
+            isSyncing={syncingBotId === bot.id}
           />
         ))}
       </div>
@@ -139,39 +170,32 @@ function BotCard({
   bot,
   onDelete,
   onLogin,
+  onSync,
   isQrActive,
   qrCode,
+  isSyncing,
 }: {
   bot: ZaloBot;
   onDelete: () => void;
   onLogin: () => void;
+  onSync: () => void;
   isQrActive: boolean;
   qrCode: string | null;
+  isSyncing: boolean;
 }) {
-  const statusColors = {
-    STOPPED: "bg-gray-600",
-    STARTING: "bg-yellow-600",
-    QR_WAITING: "bg-purple-600",
-    LOGGED_IN: "bg-green-600",
-    ERROR: "bg-red-600",
-  };
-
-  const statusLabels = {
-    STOPPED: "Đã dừng",
-    STARTING: "Đang khởi động...",
-    QR_WAITING: "Chờ quét QR",
-    LOGGED_IN: "Đang hoạt động",
-    ERROR: "Lỗi",
-  };
-
   const currentState = bot.status?.state || "STOPPED";
+  const isLoggedIn = currentState === "LOGGED_IN";
 
   return (
     <div className="group relative bg-gray-800 rounded-xl border border-gray-700 shadow-sm hover:shadow-xl hover:border-gray-600 transition-all duration-200 overflow-hidden flex flex-col">
       {/* Status Bar */}
       <div
         className={`h-1.5 w-full ${
-          statusColors[currentState] || "bg-gray-600"
+          isLoggedIn
+            ? "bg-green-600"
+            : currentState === "ERROR"
+            ? "bg-red-600"
+            : "bg-gray-600"
         }`}
       />
 
@@ -188,11 +212,10 @@ function BotCard({
                 {bot.name}
               </h3>
               <p className="text-xs text-gray-400 font-mono truncate max-w-[140px]">
-                ID: {bot.global_id}
+                ID: {bot.global_id || "Chưa login"}
               </p>
             </div>
           </div>
-          {/* Menu Actions (Hover to show) */}
           <button
             onClick={(e) => {
               if (window.confirm("Bạn có chắc chắn muốn xóa Bot này không?"))
@@ -207,7 +230,6 @@ function BotCard({
 
         {/* Content Area */}
         <div className="flex-1 flex flex-col items-center justify-center min-h-[160px] bg-gray-900/50 rounded-lg border border-gray-700/50 p-4 mb-4">
-          {/* Case 1: Hiển thị QR Code */}
           {isQrActive && qrCode ? (
             <div className="flex flex-col items-center animate-fade-in">
               <div className="bg-white p-2 rounded-lg mb-2">
@@ -221,32 +243,30 @@ function BotCard({
                 Quét mã Zalo để đăng nhập
               </p>
             </div>
-          ) : currentState === "QR_WAITING" && isQrActive && !qrCode ? (
-            // Case 2: Đang chờ QR (Loading)
-            <div className="flex flex-col items-center text-purple-400">
-              <IconRefresh className="w-8 h-8 animate-spin mb-2" />
-              <p className="text-xs">Đang lấy mã QR...</p>
-            </div>
-          ) : currentState === "LOGGED_IN" ? (
-            // Case 3: Đã đăng nhập
-            <div className="text-center">
+          ) : isLoggedIn ? (
+            <div className="text-center w-full">
               <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-green-900/30 text-green-400 mb-2">
                 <IconCheck className="w-6 h-6" />
               </div>
-              <p className="text-sm text-green-400 font-medium">
+              <p className="text-sm text-green-400 font-medium mb-3">
                 Session Active
               </p>
-              <p className="text-xs text-gray-500 mt-1">
-                Last login:{" "}
-                {new Date(
-                  bot.status.last_login || Date.now(),
-                ).toLocaleTimeString()}
-              </p>
+
+              {/* Sync Button */}
+              <button
+                onClick={onSync}
+                disabled={isSyncing}
+                className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-blue-900/20 hover:bg-blue-900/40 border border-blue-800 rounded-lg text-xs text-blue-300 transition-colors"
+              >
+                <IconCloudSync
+                  className={`w-4 h-4 ${isSyncing ? "animate-bounce" : ""}`}
+                />
+                {isSyncing ? "Đang đồng bộ..." : "Đồng bộ Dữ liệu"}
+              </button>
             </div>
           ) : (
-            // Case 4: Mặc định (Stopped/Error)
             <div className="text-center text-gray-500">
-              <p className="text-sm mb-1">{statusLabels[currentState]}</p>
+              <p className="text-sm mb-1">{currentState}</p>
               {currentState === "ERROR" && (
                 <p className="text-xs text-red-400 max-w-[200px] truncate">
                   {bot.status.error_message || "Lỗi không xác định"}
@@ -257,42 +277,22 @@ function BotCard({
         </div>
 
         {/* Footer Actions */}
-        <button
-          onClick={onLogin}
-          disabled={
-            currentState === "LOGGED_IN" || currentState === "QR_WAITING"
-          }
-          className={`w-full py-2.5 rounded-lg font-semibold text-sm transition-all shadow-sm ${
-            currentState === "LOGGED_IN"
-              ? "bg-gray-700 text-gray-400 cursor-not-allowed border border-gray-600"
-              : currentState === "QR_WAITING"
-              ? "bg-purple-900/50 text-purple-300 border border-purple-700 cursor-wait"
-              : "bg-white text-gray-900 hover:bg-gray-100 hover:scale-[1.02] active:scale-[0.98]"
-          }`}
-        >
-          {currentState === "LOGGED_IN"
-            ? "Đang chạy"
-            : currentState === "QR_WAITING"
-            ? "Đang chờ..."
-            : "Đăng nhập / Kích hoạt"}
-        </button>
+        {!isLoggedIn && (
+          <button
+            onClick={onLogin}
+            disabled={currentState === "QR_WAITING"}
+            className={`w-full py-2.5 rounded-lg font-semibold text-sm transition-all shadow-sm ${
+              currentState === "QR_WAITING"
+                ? "bg-purple-900/50 text-purple-300 border border-purple-700 cursor-wait"
+                : "bg-white text-gray-900 hover:bg-gray-100"
+            }`}
+          >
+            {currentState === "QR_WAITING"
+              ? "Đang chờ..."
+              : "Đăng nhập / Kích hoạt"}
+          </button>
+        )}
       </div>
     </div>
   );
 }
-
-// Icon Check (cho trạng thái Logged In)
-const IconCheck = ({ className }: { className: string }) => (
-  <svg
-    xmlns="http://www.w3.org/2000/svg"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    className={className}
-  >
-    <path
-      fillRule="evenodd"
-      d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z"
-      clipRule="evenodd"
-    />
-  </svg>
-);

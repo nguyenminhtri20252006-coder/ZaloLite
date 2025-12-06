@@ -1,13 +1,18 @@
+/**
+ * lib/actions/bot.actions.ts
+ * [SERVER ACTIONS]
+ * Quản lý Bot và các lệnh điều khiển Runtime.
+ * Updated: Thêm action syncBotDataAction.
+ */
+
 "use server";
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
+import { SyncService } from "@/lib/core/services/sync-service";
 import supabase from "@/lib/supabaseServer";
 import { revalidatePath } from "next/cache";
 import { ZaloBot } from "@/lib/types/database.types";
 
-/**
- * Lấy danh sách Bot
- */
 export async function getBotsAction() {
   const { data, error } = await supabase
     .from("zalo_bots")
@@ -18,10 +23,6 @@ export async function getBotsAction() {
   return data as ZaloBot[];
 }
 
-/**
- * [FLOW 1] Tạo Bot Placeholder cho QR Login
- * Tên tạm: "New Bot..." -> Sẽ được update sau khi login thành công
- */
 export async function createPlaceholderBotAction() {
   const tempName = `New Bot ${new Date().toLocaleTimeString()}`;
 
@@ -29,6 +30,7 @@ export async function createPlaceholderBotAction() {
     .from("zalo_bots")
     .insert({
       name: tempName,
+      // Global ID tạm, sẽ update sau khi login
       global_id: `temp_${Date.now()}`,
       status: { state: "STOPPED" },
       is_active: true,
@@ -41,18 +43,14 @@ export async function createPlaceholderBotAction() {
   return data as ZaloBot;
 }
 
-/**
- * [NEW] Tạo Bot với tên tùy chỉnh (Fix lỗi 'createBotAction' not found)
- */
 export async function createBotAction(name: string) {
   const { data, error } = await supabase
     .from("zalo_bots")
     .insert({
       name: name,
-      // Tạo ID tạm thời để bypass constraint unique, sẽ update khi login thành công
       global_id: `temp_${Date.now()}_${Math.random()
         .toString(36)
-        .substr(2, 9)}`,
+        .substring(2, 9)}`,
       status: { state: "STOPPED" },
       is_active: true,
     })
@@ -64,19 +62,12 @@ export async function createBotAction(name: string) {
   return data as ZaloBot;
 }
 
-/**
- * [FLOW 1] Trigger Login QR
- */
 export async function startBotLoginAction(botId: string) {
   const manager = BotRuntimeManager.getInstance();
-  // Chạy background, không await kết quả login
   manager.startLoginQR(botId);
   return { success: true };
 }
 
-/**
- * [FLOW 2] Thêm Bot bằng Token JSON
- */
 export async function addBotWithTokenAction(tokenJson: string) {
   let credentials;
   try {
@@ -89,27 +80,19 @@ export async function addBotWithTokenAction(tokenJson: string) {
   }
 
   try {
-    // 1. Tạo Bot Placeholder trước
     const bot = await createPlaceholderBotAction();
-
-    // 2. Gọi Runtime để login thử
     const manager = BotRuntimeManager.getInstance();
     await manager.loginWithCredentials(bot.id, credentials);
 
     revalidatePath("/dashboard");
     return { success: true, botId: bot.id };
   } catch (error: unknown) {
-    // [FIX] Xử lý lỗi unknown thay vì any
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return { success: false, error: errorMessage };
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errMsg };
   }
 }
 
-/**
- * [RETRY] Thử đăng nhập lại với Token cũ trong DB
- */
 export async function retryBotLoginAction(botId: string) {
-  // 1. Lấy token từ DB
   const { data: bot } = await supabase
     .from("zalo_bots")
     .select("access_token")
@@ -128,9 +111,8 @@ export async function retryBotLoginAction(botId: string) {
     await manager.loginWithCredentials(botId, bot.access_token);
     return { success: true };
   } catch (error: unknown) {
-    // [FIX] Xử lý lỗi unknown thay vì any
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return { success: false, error: errorMessage };
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errMsg };
   }
 }
 
@@ -138,9 +120,30 @@ export async function deleteBotAction(botId: string) {
   const { error } = await supabase.from("zalo_bots").delete().eq("id", botId);
   if (error) throw new Error(error.message);
 
-  // Stop runtime
   const manager = BotRuntimeManager.getInstance();
   await manager.stopBot(botId);
 
   revalidatePath("/dashboard");
+}
+
+/**
+ * [NEW] Action kích hoạt đồng bộ dữ liệu thủ công
+ */
+export async function syncBotDataAction(botId: string) {
+  try {
+    // Kiểm tra xem bot có đang online không trước khi sync
+    const manager = BotRuntimeManager.getInstance();
+    // (Sẽ throw error nếu bot chưa init hoặc chưa login)
+    manager.getBotAPI(botId);
+
+    // Chạy sync nền (không await để trả về UI ngay)
+    SyncService.syncAll(botId).then((res) => {
+      console.log(`[Action] Background sync result for ${botId}:`, res);
+    });
+
+    return { success: true, message: "Đã bắt đầu tiến trình đồng bộ ngầm." };
+  } catch (error: unknown) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: `Bot chưa sẵn sàng: ${errMsg}` };
+  }
 }

@@ -1,8 +1,8 @@
 /**
  * lib/core/pipelines/message-parser.ts
  * [PIPELINE STEP 2]
- * Chuyển đổi RawZaloMessage -> StandardMessage.
- * [FIX] Bổ sung trích xuất Avatar người gửi.
+ * Chuyển đổi RawZaloMessage (unknown) -> StandardMessage.
+ * Updated: Typesafe (no any), sử dụng Type Guards để validate dữ liệu từ Zalo.
  */
 
 import {
@@ -18,20 +18,42 @@ export class MessageParser {
         return null;
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data = rawMsg.data as any;
-      const { msgType, content, uidFrom, dName, ts, quote, msgId, cliMsgId } =
-        data;
+      const data = rawMsg.data;
 
-      // [FIX] Trích xuất Avatar từ message raw (thường là trường 'avt' hoặc 'avatar')
-      const senderAvatar = data.avt || data.avatar || "";
+      // Trích xuất an toàn các trường
+      // Lưu ý: Cần cast về Record<string, unknown> để truy cập thuộc tính
+      const msgData = data as unknown as Record<string, unknown>;
+
+      const msgType = String(msgData.msgType || "");
+      const content = msgData.content;
+      const uidFrom = String(msgData.uidFrom || "");
+      const dName = String(msgData.dName || "");
+      const ts = String(msgData.ts || "0");
+      const msgId = String(msgData.msgId || "");
+      const cliMsgId = String(msgData.cliMsgId || "");
+
+      // Trích xuất Avatar (thường là 'avt' hoặc 'avatar')
+      const senderAvatar = String(msgData.avt || msgData.avatar || "");
+
+      // Xử lý Quote (Trích dẫn)
+      let quote: StandardMessage["quote"] = undefined;
+      const rawQuote = msgData.quote as Record<string, unknown> | undefined;
+
+      if (rawQuote) {
+        quote = {
+          text: String(rawQuote.msg || ""),
+          senderId: String(rawQuote.ownerId || ""),
+          attach:
+            typeof rawQuote.attach === "string" ? rawQuote.attach : undefined,
+        };
+      }
 
       // 1. Chuẩn hóa Content
       const normalizedContent = this.parseContent(msgType, content);
 
       // 2. Xây dựng object chuẩn
       const standardMsg: StandardMessage = {
-        msgId: msgId || cliMsgId || Date.now().toString(),
+        msgId: msgId || cliMsgId || String(Date.now()),
         threadId: rawMsg.threadId,
         isGroup: rawMsg.type === 1,
         type: rawMsg.type,
@@ -40,16 +62,10 @@ export class MessageParser {
         sender: {
           uid: uidFrom,
           name: dName || "Unknown",
-          avatar: senderAvatar, // [NEW] Thêm avatar
+          avatar: senderAvatar,
         },
         content: normalizedContent,
-        quote: quote
-          ? {
-              text: quote.msg,
-              senderId: quote.ownerId,
-              attach: quote.attach,
-            }
-          : undefined,
+        quote: quote,
       };
 
       return standardMsg;
@@ -63,18 +79,13 @@ export class MessageParser {
     // Helper: Ép kiểu cục bộ an toàn
     const c = content as Record<string, unknown>;
 
+    if (!c) return { type: "unknown", raw: content };
+
     // A. TEXT & WEBCHAT (Rich Text)
     if (type === "webchat" || type === "chat.text") {
-      // ... (Giữ nguyên logic cũ của Text)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const webChatData = content as any;
-      const text =
-        webChatData.title ||
-        webChatData.msg ||
-        webChatData.description ||
-        webChatData.message ||
-        webChatData.content ||
-        "";
+      const text = String(
+        c.title || c.msg || c.description || c.message || c.content || "",
+      );
 
       return {
         type: "text",
@@ -84,7 +95,7 @@ export class MessageParser {
     }
 
     // B. STICKER
-    if (type === "chat.sticker" && c) {
+    if (type === "chat.sticker") {
       return {
         type: "sticker",
         data: {
@@ -97,7 +108,7 @@ export class MessageParser {
     }
 
     // C. PHOTO
-    if (type === "chat.photo" && c) {
+    if (type === "chat.photo") {
       return {
         type: "photo",
         data: {
@@ -112,13 +123,13 @@ export class MessageParser {
     }
 
     // D. VIDEO
-    if (type === "chat.video.msg" && c) {
+    if (type === "chat.video.msg") {
       return {
         type: "video",
         data: {
           url: String(c.href || ""),
           thumbnail: String(c.thumb || ""),
-          duration: 0,
+          duration: Number(c.duration) || 0,
           width: 0,
           height: 0,
         },
@@ -126,18 +137,18 @@ export class MessageParser {
     }
 
     // E. VOICE
-    if (type === "chat.voice" && c) {
+    if (type === "chat.voice") {
       return {
         type: "voice",
         data: {
           url: String(c.href || ""),
-          duration: 0,
+          duration: Number(c.duration) || 0,
         },
       };
     }
 
     // F. LINK
-    if (type === "chat.recommended" && c) {
+    if (type === "chat.recommended") {
       return {
         type: "link",
         data: {
