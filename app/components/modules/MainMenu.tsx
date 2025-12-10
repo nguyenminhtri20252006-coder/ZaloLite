@@ -1,8 +1,11 @@
+/**
+ * app/components/modules/MainMenu.tsx
+ * [UPDATED] Thêm menu Staff, cập nhật label.
+ */
 "use client";
 
 import { ReactNode } from "react";
 import { ViewState } from "@/lib/types/zalo.types";
-import { Avatar } from "@/app/components/ui/Avatar";
 import {
   IconUser,
   IconLogout,
@@ -13,7 +16,7 @@ import {
 } from "@/app/components/ui/Icons";
 import { staffLogoutAction } from "@/lib/actions/staff.actions";
 
-// Icon Robot (cho Bot Manager)
+// Icon Robot
 const IconRobot = ({ className }: { className: string }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
@@ -117,9 +120,7 @@ export function MainMenu({
   customWidth?: number;
 }) {
   const handleLogout = async () => {
-    if (confirm("Bạn có chắc chắn muốn đăng xuất?")) {
-      await staffLogoutAction();
-    }
+    if (confirm("Bạn có chắc chắn muốn đăng xuất?")) await staffLogoutAction();
   };
 
   return (
@@ -138,7 +139,6 @@ export function MainMenu({
             {staffInfo?.username?.substring(0, 2).toUpperCase() || "AD"}
           </div>
         </div>
-
         <div
           className={`flex-1 overflow-hidden transition-opacity duration-200 ${
             isExpanded ? "opacity-100" : "opacity-0 w-0 hidden"
@@ -162,14 +162,6 @@ export function MainMenu({
       {/* 2. Navigation */}
       <div className="flex-1 space-y-2 px-3 overflow-y-auto scrollbar-thin">
         <TabButton
-          icon={IconRobot}
-          label="Quản lý Bot System"
-          isActive={currentView === "manage"}
-          onClick={() => onChangeView("manage")}
-          isExpanded={isExpanded}
-        />
-
-        <TabButton
           icon={IconChatBubble}
           label="Live Chat"
           isActive={currentView === "chat"}
@@ -177,7 +169,23 @@ export function MainMenu({
           isExpanded={isExpanded}
         />
 
-        {/* [NEW] CRM Menu Item */}
+        <TabButton
+          icon={IconRobot}
+          label="Quản lý Bot"
+          isActive={currentView === "manage"}
+          onClick={() => onChangeView("manage")}
+          isExpanded={isExpanded}
+        />
+
+        {/* Chỉ Admin mới thấy Tab Nhân viên? Tạm thời hiển thị cho cả staff để họ đổi mk */}
+        <TabButton
+          icon={IconUser}
+          label="Quản lý Nhân viên"
+          isActive={currentView === "staff"}
+          onClick={() => onChangeView("staff")}
+          isExpanded={isExpanded}
+        />
+
         <TabButton
           icon={IconUsers}
           label="CRM Khách Hàng"
@@ -196,7 +204,6 @@ export function MainMenu({
           isExpanded={isExpanded}
           isDestructive={true}
         />
-
         <button
           onClick={onToggleMenu}
           className="flex w-full items-center justify-center gap-3 rounded-lg p-3 text-gray-500 hover:text-white hover:bg-gray-800 transition-colors mt-2"

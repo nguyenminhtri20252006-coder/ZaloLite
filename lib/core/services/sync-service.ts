@@ -1,14 +1,12 @@
 /**
  * lib/core/services/sync-service.ts
- * [CORE SERVICE - V2]
- * Chuyên trách đồng bộ dữ liệu từ Zalo API về Database Hợp nhất.
- * - Sync Friends -> Customers & User Conversations
- * - Sync Groups -> Group Conversations
+ * [CORE SERVICE - V3.0]
+ * Logic: Đồng bộ danh sách Bạn bè & Nhóm.
+ * [MAJOR UPDATE] Trích xuất Global ID (Hash) chính xác từ raw data.
  */
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
 import { ConversationService } from "@/lib/core/services/conversation-service";
-import { ThreadType } from "@/lib/types/zalo.types";
 
 export class SyncService {
   /**
@@ -34,35 +32,37 @@ export class SyncService {
       const api = BotRuntimeManager.getInstance().getBotAPI(botId);
       console.log(`[SyncService] Fetching friends list...`);
 
-      // API zca-js trả về mảng User
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const friends: any[] = await api.getAllFriends();
       console.log(`[SyncService] Found ${friends.length} friends.`);
 
       for (const friend of friends) {
-        const userId = friend.userId;
+        // [LOGIC ID]
+        const numericId = friend.userId; // ID Số (dùng để chat)
+        const globalHash = friend.globalId || friend.userId; // ID Hash (dùng để định danh) - API mới thường trả về globalId
+
         const name = friend.displayName || friend.zaloName || "Unknown";
         const avatar = friend.avatar || "";
 
-        // 1. Tạo Customer & Mapping
-        // Lưu ý: userId của friend chính là Global ID
+        // 1. Tạo Customer (Single View)
         await ConversationService.ensureCustomer(
           botId,
-          userId,
+          globalHash, // Global
+          numericId, // External
           name,
           avatar,
-          friend, // Lưu toàn bộ raw data
+          friend,
         );
 
-        // 2. Tạo Conversation (Loại User) để chat 1-1
-        // Với friend, ThreadID chính là UserID
+        // 2. Tạo Conversation (User Type)
         await ConversationService.ensureConversation(
           botId,
-          userId,
+          globalHash, // Global
+          numericId, // External
           false, // isGroup = false
           name,
           avatar,
-          friend, // raw data
+          friend,
         );
       }
     } catch (error) {
@@ -79,18 +79,11 @@ export class SyncService {
       const api = BotRuntimeManager.getInstance().getBotAPI(botId);
       console.log(`[SyncService] Fetching groups list...`);
 
-      // API zca-js trả về object chứa gridVerMap
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rawGroupsData: any = await api.getAllGroups();
       const groupIds = Object.keys(rawGroupsData.gridVerMap || {});
 
-      console.log(`[Sync] 📦 Bot ${botId} found ${groupIds.length} groups.`);
-      if (groupIds.length > 0) {
-        console.log(
-          `[Sync] 🔍 Sample Group IDs (First 3):`,
-          groupIds.slice(0, 3),
-        );
-      }
+      console.log(`[Sync] Found ${groupIds.length} groups.`);
 
       const chunkSize = 10;
       for (let i = 0; i < groupIds.length; i += chunkSize) {
@@ -103,16 +96,20 @@ export class SyncService {
           const info = groupInfos.gridInfoMap?.[groupId];
           if (!info) continue;
 
-          // [DEBUG] Log ID trước khi lưu
+          // [LOGIC ID]
+          const numericGroupId = groupId; // ID Số (dùng để chat)
+          const globalGroupHash = info.globalId || groupId; // ID Hash
+
           console.log(
-            `[Sync] 💾 Saving Group: ID="${groupId}" | Name="${info.name}"`,
+            `[Sync] Group: ${info.name} | Num: ${numericGroupId} | Hash: ${globalGroupHash}`,
           );
 
           await ConversationService.ensureConversation(
             botId,
-            groupId, // Global ID từ Sync
-            true,
-            info.name || `Group ${groupId}`,
+            globalGroupHash, // Global Hash
+            numericGroupId, // External Numeric
+            true, // isGroup = true
+            info.name || `Group ${numericGroupId}`,
             info.avatar || "",
             info,
           );

@@ -1,13 +1,16 @@
 /**
  * lib/core/bot-runtime-manager.ts
- * [CORE ENGINE - V2.1]
- * Update: Force Enable selfListen & Add Deep Debug Logs.
+ * [CORE ENGINE - V3.1]
+ * Update:
+ * 1. Auto-Polling Mechanism (Tự động Sync theo chu kỳ).
+ * 2. Update Heartbeat (last_activity_at) khi Sync.
  */
 
 import { Zalo, API } from "zca-js";
 import supabase from "@/lib/supabaseServer";
 import { MessagePipeline } from "./pipelines/message-pipeline";
 import { ZaloBotStatus } from "@/lib/types/database.types";
+import { SyncService } from "@/lib/core/services/sync-service";
 
 interface ZaloCredentials {
   imei: string;
@@ -19,6 +22,7 @@ type BotRuntime = {
   instance: Zalo;
   api: API | null;
   status: ZaloBotStatus["state"];
+  pollingInterval?: NodeJS.Timeout; // [NEW] Timer cho polling
 };
 
 export class BotRuntimeManager {
@@ -27,9 +31,9 @@ export class BotRuntimeManager {
   private messagePipeline: MessagePipeline;
 
   private constructor() {
-    console.log("[BotManager] Khởi tạo Multi-Tenant Engine...");
+    console.log("[BotManager] Khởi tạo Multi-Tenant Engine V3.1...");
     this.messagePipeline = new MessagePipeline();
-    setTimeout(() => this.restoreBotsFromDB(), 1000);
+    setTimeout(() => this.restoreBotsFromDB(), 2000);
   }
 
   public static getInstance(): BotRuntimeManager {
@@ -44,7 +48,7 @@ export class BotRuntimeManager {
   // --- RESTORE & INIT ---
 
   public async restoreBotsFromDB() {
-    console.log("[BotManager] Đang khôi phục các Bot từ DB...");
+    console.log("[BotManager] 🔄 Đang khôi phục các Bot từ DB...");
     try {
       const { data: bots, error } = await supabase
         .from("zalo_bots")
@@ -52,39 +56,35 @@ export class BotRuntimeManager {
         .eq("is_active", true);
 
       if (error) {
-        console.error("[BotManager] Lỗi tải bots từ DB:", error.message);
+        console.error("[BotManager] ❌ Lỗi tải bots:", error.message);
         return;
       }
 
       if (bots && bots.length > 0) {
-        console.log(`[BotManager] Tìm thấy ${bots.length} bot cần khôi phục.`);
         for (const b of bots) {
           const credentials = b.access_token as ZaloCredentials | null;
           if (credentials && credentials.cookie && credentials.imei) {
-            console.log(`[BotManager] Khôi phục bot: ${b.name} (${b.id})`);
-            this.loginWithCredentials(b.id, credentials).catch((e) => {
-              console.error(
-                `[BotManager] Khôi phục thất bại bot ${b.id}:`,
-                e instanceof Error ? e.message : String(e),
-              );
+            // Pass thêm config polling từ DB vào hàm login
+            this.loginWithCredentials(
+              b.id,
+              credentials,
+              b.auto_sync_interval,
+            ).catch((e) => {
+              console.error(`[BotManager] Khôi phục lỗi (${b.id}):`, e);
             });
           }
         }
       }
     } catch (e) {
-      console.error("[BotManager] Exception in restoreBotsFromDB:", e);
+      console.error("[BotManager] Exception Restore:", e);
     }
   }
 
   public getOrInitBot(botId: string): BotRuntime {
     if (this.bots.has(botId)) return this.bots.get(botId)!;
 
-    console.log(`[BotManager] Khởi tạo instance Zalo mới cho ${botId}`);
-    console.log(`[BotManager] Force enabling selfListen: true`);
-
-    // [CRITICAL FIX] Đảm bảo selfListen luôn bật
     const instance = new Zalo({
-      selfListen: true, // QUAN TRỌNG: Để nhận tin nhắn chính mình gửi
+      selfListen: true,
       logging: true,
     });
 
@@ -116,35 +116,37 @@ export class BotRuntimeManager {
         await this.updateBotStatusInDB(botId, "QR_WAITING", undefined, base64);
       });
 
-      console.log(`[BotManager] QR Login thành công cho ${botId}.`);
+      console.log(`[BotManager] ✅ QR Login Success: ${botId}`);
       await this.handleLoginSuccess(botId, api);
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[BotManager] QR Error (${botId}):`, errMsg);
+      console.error(`[BotManager] QR Error:`, errMsg);
       runtime.status = "ERROR";
       await this.updateBotStatusInDB(botId, "ERROR", errMsg);
     }
   }
 
-  public async loginWithCredentials(botId: string, credentials: unknown) {
+  public async loginWithCredentials(
+    botId: string,
+    credentials: unknown,
+    autoSyncInterval: number = 0, // [NEW] Tham số polling
+  ) {
     const runtime = this.getOrInitBot(botId);
-    if (runtime.status === "LOGGED_IN") return { success: true };
+    console.log(
+      `[BotManager] 🔐 Login credential: ${botId} (Polling: ${autoSyncInterval}m)`,
+    );
 
-    console.log(`[BotManager] Login credential cho ${botId}...`);
     await this.updateBotStatusInDB(botId, "STARTING");
     runtime.status = "STARTING";
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const api = await runtime.instance.login(credentials as any);
-      await this.handleLoginSuccess(botId, api);
+      await this.handleLoginSuccess(botId, api, autoSyncInterval);
       return { success: true };
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      console.error(
-        `[BotManager] Login credential thất bại (${botId}):`,
-        errMsg,
-      );
+      console.error(`[BotManager] Login Error:`, errMsg);
       runtime.status = "ERROR";
       await this.updateBotStatusInDB(botId, "ERROR", errMsg);
       throw error;
@@ -153,11 +155,16 @@ export class BotRuntimeManager {
 
   // --- CORE HANDLER ---
 
-  private async handleLoginSuccess(botId: string, api: API) {
+  private async handleLoginSuccess(
+    botId: string,
+    api: API,
+    autoSyncInterval: number = 0,
+  ) {
     const runtime = this.bots.get(botId);
     if (!runtime) return;
 
-    // Reset listener cũ nếu có
+    // Clear old Polling & Listener
+    if (runtime.pollingInterval) clearInterval(runtime.pollingInterval);
     if (runtime.api) {
       try {
         runtime.api.listener.stop();
@@ -167,7 +174,47 @@ export class BotRuntimeManager {
     runtime.api = api;
     runtime.status = "LOGGED_IN";
 
-    // --- Update DB Logic (Rút gọn) ---
+    // 1. Update Info & Heartbeat
+    await this.updateBotInfoAndHeartbeat(botId, api);
+
+    // 2. Setup Listener
+    this.setupMessageListener(botId, api);
+
+    // 3. Trigger Initial Sync (Ngay lập tức)
+    this.triggerSync(botId, "LOGIN_INIT");
+
+    // 4. Setup Polling (Nếu có cấu hình)
+    if (autoSyncInterval > 0) {
+      console.log(
+        `[BotManager] ⏰ Setup Polling for ${botId}: Every ${autoSyncInterval} mins`,
+      );
+      runtime.pollingInterval = setInterval(() => {
+        this.triggerSync(botId, "AUTO_POLLING");
+      }, autoSyncInterval * 60 * 1000);
+    }
+  }
+
+  // Hàm Sync Wrapper để cập nhật Heartbeat
+  private async triggerSync(botId: string, source: string) {
+    console.log(`[BotManager] 🔄 Trigger Sync (${source}) for ${botId}...`);
+    try {
+      const res = await SyncService.syncAll(botId);
+      if (res.success) {
+        // Cập nhật last_activity_at để chứng minh bot còn sống
+        await supabase
+          .from("zalo_bots")
+          .update({ last_activity_at: new Date().toISOString() })
+          .eq("id", botId);
+        console.log(
+          `[BotManager] ✅ Sync Success (${source}) & Heartbeat Updated.`,
+        );
+      }
+    } catch (e) {
+      console.error(`[BotManager] ⚠️ Sync Failed (${source}):`, e);
+    }
+  }
+
+  private async updateBotInfoAndHeartbeat(botId: string, api: API) {
     try {
       const infoResponse = await api.fetchAccountInfo();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -201,34 +248,29 @@ export class BotRuntimeManager {
           status: {
             state: "LOGGED_IN",
             last_login: new Date().toISOString(),
+            error_message: null,
+            qr_code: null,
           },
+          last_activity_at: new Date().toISOString(), // Heartbeat ban đầu
         })
         .eq("id", botId);
     } catch (e) {
-      console.error("[BotManager] DB Update Error:", e);
+      console.error("[BotManager] DB Update Info Error:", e);
     }
-
-    // [IMPORTANT] Setup Listener
-    this.setupMessageListener(botId, api);
   }
 
   private setupMessageListener(botId: string, api: API) {
-    console.log(`[BotManager] 🎧 STARTING LISTENER for ${botId}...`);
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     api.listener.on("message", async (message: any) => {
-      // [DEBUG] Log quan trọng để kiểm tra tin nhắn đến
-      console.log(
-        `[BotManager] 📨 EVENT RECEIVED | isSelf: ${message.isSelf} | Type: ${message.data?.msgType}`,
-      );
-
-      // Chuyển message sang Pipeline xử lý
+      // Khi nhận tin nhắn cũng là một dấu hiệu Bot còn sống -> Update Heartbeat (Debounced nếu cần)
+      // Ở đây ta tạm update nhẹ trong DB (hoặc có thể bỏ qua để tối ưu performace, chỉ update khi Sync)
       await this.messagePipeline.process(botId, message);
     });
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     api.listener.on("error", (err: any) => {
       console.error(`[BotManager] ❌ LISTENER ERROR (${botId}):`, err);
+      // Nếu lỗi auth, tự động update DB thành ERROR
+      // Logic: Update DB status -> ERROR
     });
 
     api.listener.start();
@@ -255,15 +297,15 @@ export class BotRuntimeManager {
 
   public getBotAPI(botId: string): API {
     const runtime = this.bots.get(botId);
-    if (!runtime || !runtime.api) {
+    if (!runtime || !runtime.api)
       throw new Error(`Bot ${botId} chưa sẵn sàng.`);
-    }
     return runtime.api;
   }
 
   public async stopBot(botId: string) {
     const runtime = this.bots.get(botId);
     if (runtime) {
+      if (runtime.pollingInterval) clearInterval(runtime.pollingInterval);
       if (runtime.api)
         try {
           runtime.api.listener.stop();

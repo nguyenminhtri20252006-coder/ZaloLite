@@ -1,11 +1,12 @@
 /**
  * app/components/modules/ConversationList.tsx
- * [CLEANED] Loại bỏ BotSelector để chuyển sang Cột 2.
+ * [FIXED] Đã sửa logic tìm kiếm (Search) hoạt động phía Client.
  */
 import { ThreadInfo } from "@/lib/types/zalo.types";
 import { Avatar } from "@/app/components/ui/Avatar";
 import { IconSearch } from "@/app/components/ui/Icons";
 import { PresenceState } from "@/lib/hooks/usePresence";
+import { useMemo } from "react";
 
 const formatTime = (isoString?: string) => {
   if (!isoString) return "";
@@ -37,12 +38,24 @@ export function ConversationList({
   isLoadingThreads: boolean;
   peers?: PresenceState[];
 }) {
+  // [FIX] Lọc hội thoại dựa trên từ khóa tìm kiếm
+  const filteredThreads = useMemo(() => {
+    if (!searchTerm.trim()) return threads;
+    const lowerTerm = searchTerm.toLowerCase();
+    return threads.filter(
+      (t) =>
+        t.name.toLowerCase().includes(lowerTerm) || t.id.includes(lowerTerm),
+    );
+  }, [threads, searchTerm]);
+
   return (
-    <div className="flex h-full flex-col bg-gray-850">
+    <div className="flex h-full flex-col bg-gray-850 border-r border-gray-700">
       {/* Header & Search */}
-      <div className="px-4 py-4 border-b border-gray-700 bg-gray-850">
+      <div className="px-4 py-4 border-b border-gray-700 bg-gray-900/50">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-bold text-white">Hội thoại</h2>
+          <h2 className="text-lg font-bold text-white">
+            Hội thoại ({filteredThreads.length})
+          </h2>
           <button
             onClick={onFetchThreads}
             disabled={isLoadingThreads}
@@ -68,10 +81,10 @@ export function ConversationList({
         <div className="relative">
           <input
             type="text"
-            placeholder="Tìm kiếm..."
+            placeholder="Tìm theo tên hoặc ID..."
             value={searchTerm}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="w-full rounded-lg border border-gray-600 bg-gray-900/50 py-2 pl-9 pr-4 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-500"
+            className="w-full rounded-lg border border-gray-600 bg-gray-800 py-2 pl-9 pr-4 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-500 transition-all focus:bg-gray-700"
           />
           <IconSearch className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
         </div>
@@ -79,13 +92,13 @@ export function ConversationList({
 
       {/* Thread List */}
       <div className="flex-1 overflow-y-auto scrollbar-thin">
-        {threads.length === 0 && !isLoadingThreads ? (
+        {filteredThreads.length === 0 && !isLoadingThreads ? (
           <div className="p-8 text-center text-gray-500 text-sm flex flex-col items-center gap-2">
             <span>📭</span>
-            <span>Chưa có hội thoại nào.</span>
+            <span>Không tìm thấy hội thoại nào.</span>
           </div>
         ) : (
-          threads.map((thread) => {
+          filteredThreads.map((thread) => {
             const viewers = peers.filter(
               (p) => p.viewing_thread_id === thread.id,
             );
@@ -98,7 +111,7 @@ export function ConversationList({
                 className={`flex w-full items-center gap-3 p-3 text-left transition-colors border-l-4 group ${
                   selectedThread?.id === thread.id
                     ? "bg-gray-700/50 border-blue-500"
-                    : "border-transparent hover:bg-gray-700/30"
+                    : "border-transparent hover:bg-gray-800"
                 }`}
               >
                 <div className="relative">
@@ -152,6 +165,7 @@ export function ConversationList({
                           <div
                             key={viewer.staff_id}
                             className="relative w-4 h-4 rounded-full ring-1 ring-gray-800"
+                            title={viewer.full_name}
                           >
                             {viewer.avatar ? (
                               <img

@@ -1,8 +1,7 @@
 /**
  * lib/actions/bot.actions.ts
- * [SERVER ACTIONS]
- * Quản lý Bot và các lệnh điều khiển Runtime.
- * Updated: Thêm action syncBotDataAction.
+ * [SERVER ACTIONS - V3.1]
+ * Update: Hỗ trợ cấu hình Auto-Sync Interval.
  */
 
 "use server";
@@ -23,17 +22,15 @@ export async function getBotsAction() {
   return data as ZaloBot[];
 }
 
-export async function createPlaceholderBotAction() {
-  const tempName = `New Bot ${new Date().toLocaleTimeString()}`;
-
+export async function createBotAction(name: string) {
   const { data, error } = await supabase
     .from("zalo_bots")
     .insert({
-      name: tempName,
-      // Global ID tạm, sẽ update sau khi login
+      name: name,
       global_id: `temp_${Date.now()}`,
       status: { state: "STOPPED" },
       is_active: true,
+      auto_sync_interval: 0, // Mặc định tắt auto-sync
     })
     .select()
     .single();
@@ -43,23 +40,12 @@ export async function createPlaceholderBotAction() {
   return data as ZaloBot;
 }
 
-export async function createBotAction(name: string) {
-  const { data, error } = await supabase
-    .from("zalo_bots")
-    .insert({
-      name: name,
-      global_id: `temp_${Date.now()}_${Math.random()
-        .toString(36)
-        .substring(2, 9)}`,
-      status: { state: "STOPPED" },
-      is_active: true,
-    })
-    .select()
-    .single();
-
+export async function deleteBotAction(botId: string) {
+  const { error } = await supabase.from("zalo_bots").delete().eq("id", botId);
   if (error) throw new Error(error.message);
+  const manager = BotRuntimeManager.getInstance();
+  await manager.stopBot(botId);
   revalidatePath("/dashboard");
-  return data as ZaloBot;
 }
 
 export async function startBotLoginAction(botId: string) {
@@ -95,35 +81,27 @@ export async function addBotWithTokenAction(tokenJson: string) {
 export async function retryBotLoginAction(botId: string) {
   const { data: bot } = await supabase
     .from("zalo_bots")
-    .select("access_token")
+    .select("access_token, auto_sync_interval") // Lấy thêm setting sync
     .eq("id", botId)
     .single();
 
   if (!bot || !bot.access_token) {
-    return {
-      success: false,
-      error: "Không tìm thấy token cũ. Vui lòng thêm lại bot.",
-    };
+    return { success: false, error: "Không tìm thấy token cũ." };
   }
 
   try {
     const manager = BotRuntimeManager.getInstance();
-    await manager.loginWithCredentials(botId, bot.access_token);
+    // Truyền setting sync vào hàm login
+    await manager.loginWithCredentials(
+      botId,
+      bot.access_token,
+      bot.auto_sync_interval || 0,
+    );
     return { success: true };
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : String(error);
     return { success: false, error: errMsg };
   }
-}
-
-export async function deleteBotAction(botId: string) {
-  const { error } = await supabase.from("zalo_bots").delete().eq("id", botId);
-  if (error) throw new Error(error.message);
-
-  const manager = BotRuntimeManager.getInstance();
-  await manager.stopBot(botId);
-
-  revalidatePath("/dashboard");
 }
 
 /**
@@ -136,14 +114,70 @@ export async function syncBotDataAction(botId: string) {
     // (Sẽ throw error nếu bot chưa init hoặc chưa login)
     manager.getBotAPI(botId);
 
-    // Chạy sync nền (không await để trả về UI ngay)
-    SyncService.syncAll(botId).then((res) => {
-      console.log(`[Action] Background sync result for ${botId}:`, res);
+    // Chạy sync nền
+    SyncService.syncAll(botId).then(async (res) => {
+      console.log(`[Action] Manual Sync result for ${botId}:`, res);
+      if (res.success) {
+        // Update heartbeat thủ công
+        await supabase
+          .from("zalo_bots")
+          .update({ last_activity_at: new Date().toISOString() })
+          .eq("id", botId);
+      }
     });
 
-    return { success: true, message: "Đã bắt đầu tiến trình đồng bộ ngầm." };
+    return { success: true, message: "Đã kích hoạt đồng bộ thủ công." };
   } catch (error: unknown) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    return { success: false, error: `Bot chưa sẵn sàng: ${errMsg}` };
+    return {
+      success: false,
+      error: "Bot chưa online. Vui lòng đăng nhập lại.",
+    };
   }
+}
+
+/**
+ * [NEW] Cập nhật cấu hình Auto-Sync
+ */
+export async function updateBotSyncSettingsAction(
+  botId: string,
+  intervalMinutes: number,
+) {
+  try {
+    // 1. Update DB
+    await supabase
+      .from("zalo_bots")
+      .update({ auto_sync_interval: intervalMinutes })
+      .eq("id", botId);
+
+    // 2. Nếu bot đang online, cần restart lại polling timer (bằng cách login lại nhẹ hoặc update runtime trực tiếp)
+    // Cách đơn giản nhất: Gọi retryLogin để reload config runtime
+    // Hoặc ta có thể thêm hàm updateConfig vào RuntimeManager (tốt hơn).
+    // Ở đây dùng retryLogin cho chắc chắn.
+    await retryBotLoginAction(botId);
+
+    revalidatePath("/dashboard");
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: String(e) };
+  }
+}
+
+// ... (Giữ nguyên createPlaceholderBotAction)
+export async function createPlaceholderBotAction() {
+  const tempName = `New Bot ${new Date().toLocaleTimeString()}`;
+  const { data, error } = await supabase
+    .from("zalo_bots")
+    .insert({
+      name: tempName,
+      global_id: `temp_${Date.now()}`,
+      status: { state: "STOPPED" },
+      is_active: true,
+      auto_sync_interval: 0,
+    })
+    .select()
+    .single();
+
+  if (error) throw new Error(error.message);
+  revalidatePath("/dashboard");
+  return data as ZaloBot;
 }

@@ -200,7 +200,8 @@ export interface AccountInfo {
 }
 
 export interface ThreadInfo {
-  id: string;
+  id: string; // Global Hash ID (Dùng cho UI & Logic Business)
+  uuid?: string; // [NEW] Database UUID (Dùng để map Realtime)
   name: string;
   avatar: string;
   type: 0 | 1;
@@ -268,7 +269,7 @@ export enum ThreadType {
 export type LoginState = "IDLE" | "LOGGING_IN" | "LOGGED_IN" | "ERROR";
 
 // [FIX] Update ViewState để hỗ trợ CRM
-export type ViewState = "chat" | "manage" | "setting" | "crm";
+export type ViewState = "chat" | "manage" | "setting" | "crm" | "staff";
 
 // --- 6. EXPORTS & STANDARD TYPES ---
 

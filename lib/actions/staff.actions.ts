@@ -1,7 +1,6 @@
 /**
  * lib/actions/staff.actions.ts
- * Business Logic cho Quản trị viên & Nhân viên.
- * Updated: Payload session khớp với DB schema v2 (thêm avatar, phone).
+ * [UPDATED] Thêm các hành động CRUD quản lý nhân viên.
  */
 
 "use server";
@@ -13,20 +12,21 @@ import {
   verifyPassword,
   createSessionToken,
   verifySessionToken,
+  hashPassword,
 } from "@/lib/utils/security";
-import { BotPermissionType } from "@/lib/types/database.types";
+import { BotPermissionType, StaffRole } from "@/lib/types/database.types";
 
+// ... (Giữ nguyên các hàm login/logout cũ) ...
 const COOKIE_NAME = "staff_session";
-const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000; // 7 ngày
+const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000;
 
-// [UPDATED] Session Payload đầy đủ hơn
 type SessionPayload = {
   id: string;
   username: string;
   role: string;
   full_name: string;
-  avatar?: string | null; // New
-  phone?: string | null; // New
+  avatar?: string | null;
+  phone?: string | null;
   expiresAt: number;
 };
 
@@ -35,13 +35,11 @@ export type LoginState = {
   success?: boolean;
 };
 
-/**
- * ACTION: Đăng nhập Hệ thống
- */
 export async function staffLoginAction(
   prevState: LoginState | null,
   formData: FormData,
 ): Promise<LoginState> {
+  // ... (Logic cũ)
   const username = formData.get("username") as string;
   const password = formData.get("password") as string;
 
@@ -65,7 +63,6 @@ export async function staffLoginAction(
       return { error: "Mật khẩu không chính xác." };
     }
 
-    // [UPDATED] Tạo Session Token với thông tin mở rộng
     const expiresAt = Date.now() + SESSION_DURATION;
     const payload: SessionPayload = {
       id: staff.id,
@@ -78,7 +75,6 @@ export async function staffLoginAction(
     };
 
     const token = createSessionToken(payload);
-
     const cookieStore = await cookies();
     cookieStore.set(COOKIE_NAME, token, {
       httpOnly: true,
@@ -88,25 +84,17 @@ export async function staffLoginAction(
       sameSite: "lax",
     });
 
-    await createAuditLog(staff.id, "AUTH", "LOGIN", {
-      method: "PASSWORD",
-    });
+    await createAuditLog(staff.id, "AUTH", "LOGIN", { method: "PASSWORD" });
   } catch (error: unknown) {
     const err = error instanceof Error ? error.message : String(error);
-    console.error("Login Error:", err);
     return { error: "Lỗi hệ thống: " + err };
   }
-
   redirect("/dashboard");
 }
 
 export async function staffLogoutAction() {
   const session = await getStaffSession();
-
-  if (session) {
-    await createAuditLog(session.id, "AUTH", "LOGOUT", {});
-  }
-
+  if (session) await createAuditLog(session.id, "AUTH", "LOGOUT", {});
   const cookieStore = await cookies();
   cookieStore.delete(COOKIE_NAME);
   redirect("/login");
@@ -115,18 +103,94 @@ export async function staffLogoutAction() {
 export async function getStaffSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
-
   if (!token) return null;
-
   const payload = verifySessionToken<SessionPayload>(token);
-
-  if (!payload || payload.expiresAt < Date.now()) {
-    return null;
-  }
-
+  if (!payload || payload.expiresAt < Date.now()) return null;
   return payload;
 }
 
+// --- NEW CRUD ACTIONS ---
+
+export async function getAllStaffAction() {
+  const { data, error } = await supabase
+    .from("staff_accounts")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+export async function createStaffAction(payload: {
+  username: string;
+  password: string;
+  full_name: string;
+  role: StaffRole;
+  phone?: string;
+}) {
+  const { username, password, full_name, role, phone } = payload;
+
+  // Check tồn tại
+  const { data: exist } = await supabase
+    .from("staff_accounts")
+    .select("id")
+    .eq("username", username)
+    .single();
+  if (exist) return { success: false, error: "Tên đăng nhập đã tồn tại" };
+
+  const password_hash = hashPassword(password);
+
+  const { error } = await supabase.from("staff_accounts").insert({
+    username,
+    password_hash,
+    full_name,
+    role,
+    phone,
+    is_active: true,
+  });
+
+  if (error) return { success: false, error: error.message };
+  return { success: true };
+}
+
+export async function updateStaffAction(
+  id: string,
+  payload: {
+    full_name?: string;
+    role?: StaffRole;
+    phone?: string;
+    is_active?: boolean;
+  },
+) {
+  const { error } = await supabase
+    .from("staff_accounts")
+    .update(payload)
+    .eq("id", id);
+  if (error) return { success: false, error: error.message };
+  return { success: true };
+}
+
+export async function changeStaffPasswordAction(
+  id: string,
+  newPassword: string,
+) {
+  const password_hash = hashPassword(newPassword);
+  const { error } = await supabase
+    .from("staff_accounts")
+    .update({ password_hash })
+    .eq("id", id);
+  if (error) return { success: false, error: error.message };
+  return { success: true };
+}
+
+export async function deleteStaffAction(id: string) {
+  // Không xóa admin gốc nếu muốn an toàn (logic thêm nếu cần)
+  const { error } = await supabase.from("staff_accounts").delete().eq("id", id);
+  if (error) return { success: false, error: error.message };
+  return { success: true };
+}
+
+// ... (Giữ nguyên checkBotPermission và createAuditLog)
 export async function checkBotPermission(
   staffId: string,
   botId: string,
@@ -137,18 +201,14 @@ export async function checkBotPermission(
     .select("role")
     .eq("id", staffId)
     .single();
-
   if (staff?.role === "admin") return true;
-
   const { data } = await supabase
     .from("staff_bot_permissions")
     .select("*")
     .eq("staff_id", staffId)
     .eq("bot_id", botId)
     .single();
-
   if (!data) return false;
-
   if (requiredType === "view_only") return true;
   if (
     requiredType === "chat" &&
@@ -156,7 +216,6 @@ export async function checkBotPermission(
   )
     return true;
   if (requiredType === "auth" && data.permission_type === "auth") return true;
-
   return false;
 }
 

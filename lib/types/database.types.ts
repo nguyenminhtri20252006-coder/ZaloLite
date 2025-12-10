@@ -38,6 +38,7 @@ export interface ZaloBotStatus {
   last_login?: string;
   error_message?: string;
   qr_code?: string;
+  last_update?: string;
 }
 
 export interface ZaloBot {
@@ -47,10 +48,13 @@ export interface ZaloBot {
   avatar: string | null;
   phone: string | null;
 
-  // JSONB Columns - Sử dụng unknown
-  raw_data: unknown; // Nguyên bản response fetchAccountInfo
-  access_token: unknown; // Credentials (cookie, imei, etc.)
+  raw_data: unknown;
+  access_token: unknown;
   status: ZaloBotStatus;
+
+  // [NEW FIELDS]
+  last_activity_at: string | null; // Thời gian tương tác/sync cuối cùng
+  auto_sync_interval: number; // Chu kỳ sync tự động (phút), 0 = tắt
 
   is_active: boolean;
   created_at: string;
