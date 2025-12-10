@@ -1,8 +1,8 @@
 /**
  * lib/core/pipelines/message-pipeline.ts
- * [PIPELINE STEP 3 - V2]
- * Logic: Deduplication & Upsert.
- * Updated: Thêm Logs chi tiết để debug luồng tin nhắn đến.
+ * [PIPELINE STEP 3 - V2.2]
+ * Logic: Deduplication & Atomic Upsert.
+ * [FIXED] Log chi tiết Conversation ID để debug duplicate issue.
  */
 
 import supabase from "@/lib/supabaseServer";
@@ -19,33 +19,29 @@ export class MessagePipeline {
 
   public async process(botId: string, rawMsg: RawZaloMessage) {
     try {
-      // [DEBUG] Log đầu vào để kiểm tra
-      console.log(
-        `[Pipeline] Processing Msg for Bot ${botId} | isSelf: ${rawMsg.isSelf}`,
-      );
-      // console.log(`[Pipeline] Raw Payload:`, JSON.stringify(rawMsg).slice(0, 200) + "...");
+      // [DEBUG] Log Raw Input
+      console.log(`[Pipeline] 📥 RAW EVENT from Bot ${botId}:`);
+      console.log(`   - ThreadID (Raw): "${rawMsg.threadId}"`);
+      console.log(`   - Type: ${rawMsg.type} (0=User, 1=Group)`);
+      console.log(`   - isSelf: ${rawMsg.isSelf}`);
 
-      // 1. Parse tin nhắn (Standardize)
       const message = this.parser.parse(rawMsg);
-      if (!message) {
-        console.warn("[Pipeline] Failed to parse message. Skipping.");
-        return;
-      }
+      if (!message) return;
 
-      console.log(
-        `[Pipeline] Parsed MsgID: ${message.msgId} | Type: ${message.content.type}`,
-      );
-
-      // 2. Định danh Conversation
+      // 1. Ensure Conversation (Sử dụng UPSERT mới)
+      // Đây là bước quan trọng nhất để đảm bảo tính nhất quán
       let conversationName = message.sender.name;
       let conversationAvatar = message.sender.avatar;
-
       if (message.isGroup) {
         conversationName = `Group ${message.threadId}`;
         conversationAvatar = "";
       }
 
-      // 3. Ensure Conversation & Mapping
+      // [DEBUG] Log trước khi gọi Service
+      console.log(
+        `[Pipeline] ➡️ Calling EnsureConv with GlobalID="${message.threadId}"`,
+      );
+
       const conversationUUID = await ConversationService.ensureConversation(
         botId,
         message.threadId,
@@ -56,18 +52,21 @@ export class MessagePipeline {
 
       if (!conversationUUID) {
         console.error(
-          "[Pipeline] Could not ensure conversation. Msg dropped.",
-          message.threadId,
+          `[Pipeline] Failed to ensure conversation for ${message.threadId}`,
         );
         return;
       }
 
-      // 4. Ensure Sender (Customer)
+      // [DEBUG LOG] In ra UUID để kiểm tra xem các Bot có cùng ID không
+      console.log(
+        `[Pipeline] Bot ${botId} -> ConvUUID: ${conversationUUID} | MsgID: ${message.msgId}`,
+      );
+
+      // 2. Ensure Sender
       let senderUUID: string = message.sender.uid;
       let senderType = "customer";
 
       if (!message.isSelf) {
-        // Tin nhắn từ khách -> Ensure Customer
         const custUUID = await ConversationService.ensureCustomer(
           botId,
           message.sender.uid,
@@ -76,74 +75,72 @@ export class MessagePipeline {
         );
         if (custUUID) senderUUID = custUUID;
       } else {
-        // Tin nhắn từ Bot (isSelf = true)
-        // Đây là tin nhắn do Staff gửi đi (hoặc Bot tự gửi)
-        // Trong mô hình này, sender_id chính là botId (đại diện cho "Me")
         senderType = "staff_on_bot";
         senderUUID = botId;
       }
 
-      // 5. UPSERT MESSAGE (Deduplication)
-      // Tìm xem tin nhắn này đã tồn tại trong Conversation này chưa
-      const { data: existingMsg, error: findError } = await supabase
-        .from("messages")
-        .select("id, bot_ids")
-        .eq("conversation_id", conversationUUID)
-        .eq("zalo_msg_id", message.msgId)
-        .single();
+      // 3. ATOMIC INSERT-THEN-UPDATE
+      const msgType = (message.content as { type?: string }).type || "unknown";
 
-      if (existingMsg) {
-        // A. Đã tồn tại -> Update bot_ids array (đánh dấu là bot này cũng thấy tin nhắn đó)
+      const { error: insertError } = await supabase.from("messages").insert({
+        conversation_id: conversationUUID,
+        zalo_msg_id: message.msgId,
+        sender_type: message.isSelf ? "staff_on_bot" : "customer",
+        sender_id: message.isSelf ? botId : message.sender.uid,
+        bot_ids: [botId],
+        content: message.content,
+        raw_content: rawMsg,
+        msg_type: msgType,
+
+        sent_at: new Date(message.timestamp).toISOString(),
+      });
+
+      // CASE A: Success Insert
+      if (!insertError) {
+        console.log(`[Pipeline] ✅ Inserted Msg ${message.msgId} (New)`);
+
+        // Update Activity
+        await supabase
+          .from("conversations")
+          .update({ last_activity_at: new Date().toISOString() })
+          .eq("id", conversationUUID);
+        return;
+      }
+
+      // CASE B: Duplicate Key (Đã tồn tại) -> Append Bot ID
+      if (insertError.code === "23505") {
         console.log(
-          `[Pipeline] Msg ${message.msgId} exists. Updating bot_ids...`,
+          `[Pipeline] ✅ Saved Msg ${message.msgId} to ConvUUID ${conversationUUID}`,
+        );
+      } else if (insertError.code === "23505") {
+        console.log(
+          `[Pipeline] ⚠️ Duplicate Msg ${message.msgId} in ConvUUID ${conversationUUID}. Triggering Merge...`,
         );
 
-        // Cast bot_ids về mảng string an toàn
-        const currentBotIds = (existingMsg.bot_ids as string[]) || [];
+        const { data: existingMsg } = await supabase
+          .from("messages")
+          .select("id, bot_ids")
+          .eq("conversation_id", conversationUUID)
+          .eq("zalo_msg_id", message.msgId)
+          .single();
 
-        if (!currentBotIds.includes(botId)) {
-          const newBotIds = [...currentBotIds, botId];
-          await supabase
-            .from("messages")
-            .update({ bot_ids: newBotIds })
-            .eq("id", existingMsg.id);
+        if (existingMsg) {
+          const currentBotIds = (existingMsg.bot_ids as string[]) || [];
+          if (!currentBotIds.includes(botId)) {
+            const uniqueBots = Array.from(new Set([...currentBotIds, botId]));
+            await supabase
+              .from("messages")
+              .update({ bot_ids: uniqueBots })
+              .eq("id", existingMsg.id);
+            console.log(
+              `[Pipeline] 🔄 Merged BotIDs: ${JSON.stringify(uniqueBots)}`,
+            );
+          }
         }
       } else {
-        // B. Insert mới (Chưa tồn tại)
-        console.log(`[Pipeline] Inserting NEW Msg ${message.msgId}...`);
-
-        // Xác định msg_type để lưu cột riêng
-        const msgType =
-          (message.content as { type?: string }).type || "unknown";
-
-        const { error: insertError } = await supabase.from("messages").insert({
-          conversation_id: conversationUUID,
-          sender_type: senderType,
-          sender_id: senderUUID,
-
-          // Nếu là tin self, staff_id tạm thời để null vì sự kiện selfListen không mang thông tin session của staff.
-          // (Có thể map sau nếu cần, nhưng quan trọng là không lưu trùng)
-          staff_id: null,
-
-          bot_ids: [botId],
-          zalo_msg_id: message.msgId,
-
-          content: message.content, // Normalized JSON
-          raw_content: rawMsg, // Raw JSON đầy đủ từ Zalo
-          msg_type: msgType,
-
-          sent_at: new Date(message.timestamp).toISOString(),
-        });
-
-        if (insertError) {
-          console.warn(`[Pipeline] Insert msg error:`, insertError.message);
-        } else {
-          // Update Last Activity cho Conversation để nó nhảy lên đầu
-          await supabase
-            .from("conversations")
-            .update({ last_activity_at: new Date().toISOString() })
-            .eq("id", conversationUUID);
-        }
+        console.error(
+          `[Pipeline] ❌ Insert Error: ${insertError.message} (Code: ${insertError.code})`,
+        );
       }
     } catch (error) {
       console.error("[Pipeline] Critical Error:", error);

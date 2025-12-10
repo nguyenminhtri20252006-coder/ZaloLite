@@ -301,11 +301,12 @@ export interface StandardSticker {
 export interface StandardPhoto {
   url: string;
   thumbnail: string;
+  // [FIX] Thêm các trường này để khớp với logic parser
   width: number;
   height: number;
-  size?: number;
   title?: string;
   description?: string;
+  size?: number;
 }
 
 export interface StandardVideo {

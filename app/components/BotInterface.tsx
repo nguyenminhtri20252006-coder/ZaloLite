@@ -13,16 +13,40 @@ import { ConversationList } from "./modules/ConversationList";
 import { ChatFrame } from "./modules/ChatFrame";
 import { DetailsPanel } from "./modules/DetailsPanel";
 import { BotLoginManager } from "./modules/BotLoginManager";
-import { ManagementPanel } from "./modules/ManagementPanel"; // [NEW] Import ManagementPanel
+import { ManagementPanel } from "./modules/ManagementPanel";
+import { BotListPanel } from "./modules/BotListPanel";
 import { getBotsAction } from "../../lib/actions/bot.actions";
 import {
-  getThreadsFromDBAction, // Dùng action mới từ DB
+  getThreadsFromDBAction,
   getMessagesAction,
   sendMessageAction,
 } from "../../lib/actions/chat.actions";
-import { IconCog } from "./ui/Icons";
 import supabase from "../../lib/supabaseClient";
-import { usePresence } from "../../lib/hooks/usePresence"; // [NEW] Import Hook
+import { usePresence } from "../../lib/hooks/usePresence";
+
+// Helper: Convert DB Message -> UI ZaloMessage (Append Mode)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const convertDbMessageToUi = (dbMsg: any): ZaloMessage => {
+  // [IMPORTANT] Sử dụng raw_content để lấy thông tin threadId chính xác
+  const rawData = dbMsg.raw_content?.data || {};
+  const threadId = dbMsg.raw_content?.threadId || "";
+
+  return {
+    type: 0, // Có thể lấy từ raw_content.type nếu cần
+    threadId: threadId,
+    isSelf: dbMsg.sender_type === "staff_on_bot",
+    data: {
+      msgId: dbMsg.zalo_msg_id,
+      cliMsgId: dbMsg.zalo_msg_id,
+      content: dbMsg.content, // Content này đã được parse chuẩn bởi MessageParser mới
+      ts: new Date(dbMsg.sent_at).getTime().toString(),
+      uidFrom: dbMsg.sender_id,
+      dName: rawData.dName || "",
+      msgType: dbMsg.msg_type === "text" ? "webchat" : `chat.${dbMsg.msg_type}`,
+      // Có thể thêm quote, mentions từ raw_content nếu cần hiển thị ngay lập tức
+    },
+  };
+};
 
 type BotInterfaceProps = {
   staffInfo: {
@@ -35,63 +59,59 @@ type BotInterfaceProps = {
 };
 
 export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
-  // --- GLOBAL STATE ---
+  // --- LAYOUT STATE (4 Cột Resizable) ---
   const [currentView, setCurrentView] = useState<ViewState>("chat");
-  const [bots, setBots] = useState<ZaloBot[]>([]);
 
-  // --- PRESENCE HOOK (NEW) ---
+  // Default Widths
+  const [menuWidth, setMenuWidth] = useState(64); // Cột 1
+  const [botListWidth, setBotListWidth] = useState(240); // Cột 2
+  const [convListWidth, setConvListWidth] = useState(320); // Cột 3
+
+  const [isMenuExpanded, setIsMenuExpanded] = useState(false);
+  const [resizingTarget, setResizingTarget] = useState<
+    "MENU" | "BOT_LIST" | "CONV_LIST" | null
+  >(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // --- DATA STATE ---
+  const [bots, setBots] = useState<ZaloBot[]>([]);
+  const [activeBotId, setActiveBotId] = useState<string | null>(null);
+  const [threads, setThreads] = useState<ThreadInfo[]>([]);
+  const [selectedThread, setSelectedThread] = useState<ThreadInfo | null>(null);
+  const [messages, setMessages] = useState<ZaloMessage[]>([]);
+
+  // UI States
+  const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
+  const [isLoadingThreads, setIsLoadingThreads] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+
+  // Login/QR State
+  const [activeQrBotId, setActiveQrBotId] = useState<string | null>(null);
+  const [qrCodeData, setQrCodeData] = useState<string | null>(null);
+
+  // --- PRESENCE ---
   const { peers, updateStatus } = usePresence({
     staffId: staffInfo?.id || "",
     username: staffInfo?.username || "Guest",
     fullName: staffInfo?.name || "Guest",
     role: staffInfo?.role || "staff",
-    avatar: "", // Placeholder, có thể update sau nếu DB có avatar
+    avatar: "",
   });
 
-  // --- CHAT STATE ---
-  const [activeBotIdForChat, setActiveBotIdForChat] = useState<string | null>(
-    null,
-  );
-  const [threads, setThreads] = useState<ThreadInfo[]>([]);
-  const [selectedThread, setSelectedThread] = useState<ThreadInfo | null>(null);
-  const [messages, setMessages] = useState<ZaloMessage[]>([]);
-
-  const [searchTerm, setSearchTerm] = useState("");
-  const [isLoadingThreads, setIsLoadingThreads] = useState(false);
-  const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
-
-  // State Login Flow
-  const [activeQrBotId, setActiveQrBotId] = useState<string | null>(null);
-  const [qrCodeData, setQrCodeData] = useState<string | null>(null);
-
-  const [isEchoBotEnabled, setIsEchoBotEnabled] = useState(false);
-  const [isSendingMessage, setIsSendingMessage] = useState(false);
-
-  // --- RESIZE STATE ---
-  const [menuWidth, setMenuWidth] = useState(240);
-  const [convListWidth, setConvListWidth] = useState(300);
-  const [isMenuExpanded, setIsMenuExpanded] = useState(true);
-  const [resizingTarget, setResizingTarget] = useState<
-    "MENU" | "CONV_LIST" | null
-  >(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // --- 1. INITIAL FETCH ---
+  // --- 1. INITIAL DATA FETCH ---
   const fetchBots = async () => {
     try {
       const data = await getBotsAction();
       setBots(data);
-      if (!activeBotIdForChat && data.length > 0) {
-        // Auto select bot đang online
-        const active = data.find((b) => b.status?.state === "LOGGED_IN");
-        if (active) {
-          setActiveBotIdForChat(active.id);
-          // [PRESENCE] Báo cáo bot đang hoạt động
-          updateStatus({ active_bot_id: active.id });
-        }
+      // Auto-select logic
+      if (!activeBotId && data.length > 0) {
+        // Ưu tiên bot đang đăng nhập, nếu không thì bot đầu tiên
+        const active =
+          data.find((b) => b.status?.state === "LOGGED_IN") || data[0];
+        if (active) handleSwitchBot(active.id);
       }
     } catch (e) {
-      console.error("Fetch Bots Failed:", e);
+      console.error(e);
     }
   };
 
@@ -100,15 +120,14 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- 2. FETCH THREADS (DATABASE MODE) ---
   const fetchThreads = async () => {
-    if (!activeBotIdForChat) return;
+    if (!activeBotId) return;
     setIsLoadingThreads(true);
     try {
-      const data = await getThreadsFromDBAction(activeBotIdForChat);
+      const data = await getThreadsFromDBAction(activeBotId);
       setThreads(data);
     } catch (e) {
-      console.error("Fetch Threads Error:", e);
+      console.error(e);
     } finally {
       setIsLoadingThreads(false);
     }
@@ -118,192 +137,297 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     fetchThreads();
     setSelectedThread(null);
     setMessages([]);
-    // [PRESENCE] Reset trạng thái xem thread khi đổi bot
     updateStatus({ viewing_thread_id: null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeBotIdForChat]);
+  }, [activeBotId]);
 
-  // --- 3. SUPABASE REALTIME (UPDATED) ---
+  // --- 2. REALTIME ENGINE (DB Push -> Client Append) ---
   useEffect(() => {
-    const channel = supabase
-      .channel("global-changes")
-      // A. Lắng nghe trạng thái Bot
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "zalo_bots" },
-        (payload) => {
-          if (payload.eventType === "UPDATE") {
-            const updatedBot = payload.new as ZaloBot;
-            setBots((prev) =>
-              prev.map((b) => (b.id === updatedBot.id ? updatedBot : b)),
-            );
+    // Kênh này nhận dữ liệu từ bảng messages
+    // RLS của Supabase đã tự động lọc các dòng mà staff này được phép xem
+    const channel = supabase.channel("realtime-messages");
 
-            // Handle QR Logic
-            if (updatedBot.id === activeQrBotId) {
-              const statusData = updatedBot.status;
-              if (statusData?.qr_code) setQrCodeData(statusData.qr_code);
-              if (
-                statusData?.state === "LOGGED_IN" ||
-                statusData?.state === "ERROR"
-              ) {
-                setActiveQrBotId(null);
-                setQrCodeData(null);
-                if (statusData?.state === "LOGGED_IN") fetchThreads();
-              }
+    // A. Lắng nghe thay đổi trạng thái Bot (Login/QR)
+    channel.on(
+      "postgres_changes",
+      { event: "UPDATE", schema: "public", table: "zalo_bots" },
+      (payload) => {
+        const updatedBot = payload.new as ZaloBot;
+        setBots((prev) =>
+          prev.map((b) => (b.id === updatedBot.id ? updatedBot : b)),
+        );
+
+        if (updatedBot.id === activeQrBotId) {
+          if (updatedBot.status?.qr_code)
+            setQrCodeData(updatedBot.status.qr_code);
+          if (updatedBot.status?.state === "LOGGED_IN") {
+            setActiveQrBotId(null);
+            setQrCodeData(null);
+            if (activeBotId === updatedBot.id) fetchThreads();
+          }
+        }
+      },
+    );
+
+    // B. Lắng nghe Tin nhắn mới (APPEND MODE)
+    channel.on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "messages" },
+      (payload) => {
+        const newMsgRow = payload.new;
+
+        // [FIX LOGIC LỌC]
+        // 1. Chỉ xử lý nếu tin nhắn thuộc về Bot đang active
+        // (Mặc dù RLS đã lọc, nhưng RLS cho phép xem tất cả bot mà staff quản lý.
+        // Ở Client ta chỉ muốn hiện tin nhắn của bot đang hiển thị)
+        const botIds = newMsgRow.bot_ids as string[];
+        if (!activeBotId || !botIds || !botIds.includes(activeBotId)) {
+          return;
+        }
+
+        // 2. Chuyển đổi dữ liệu
+        const uiMsg = convertDbMessageToUi(newMsgRow);
+
+        // 3. Append vào Chat Frame nếu đang mở đúng Thread
+        // Sử dụng Functional Update để đảm bảo lấy state mới nhất
+        setMessages((prev) => {
+          // Lấy threadId từ state selectedThread hiện tại (thông qua closure hoặc ref, nhưng ở đây dùng logic check payload)
+          // Cách tốt nhất: Check xem uiMsg.threadId có khớp với selectedThread.id không?
+          // Nhưng chúng ta không truy cập được selectedThread mới nhất trong callback này nếu không thêm vào dependency.
+          // Tuy nhiên thêm selectedThread vào dependency sẽ làm subscription bị reset liên tục.
+
+          // WORKAROUND: Ta sẽ luôn cập nhật state messages, nhưng ở tầng render ChatFrame chỉ render nếu ID khớp.
+          // KHÔNG ĐƯỢC, vì messages là list của 1 thread cụ thể.
+
+          // GIẢI PHÁP: Sử dụng globalZaloEmitter hoặc Ref để check ID hiện tại.
+          // Ở đây để đơn giản và hiệu quả, ta dùng Ref cho selectedThreadId
+          if (selectedThreadRef.current === uiMsg.threadId) {
+            // Check trùng lặp
+            if (prev.some((m) => m.data.msgId === uiMsg.data.msgId))
+              return prev;
+            return [...prev, uiMsg];
+          }
+          return prev;
+        });
+
+        // 4. Cập nhật Thread List (Last Activity)
+        // Nếu có tin mới, thread đó nên nhảy lên đầu.
+        // Logic này phức tạp hơn chút, tạm thời fetchThreads lại (Debounced) hoặc update state threads thủ công.
+        if (activeBotId) {
+          // Optimal: Move thread to top locally
+          setThreads((prev) => {
+            const idx = prev.findIndex((t) => t.id === uiMsg.threadId);
+            if (idx > -1) {
+              const updatedThread = {
+                ...prev[idx],
+                lastActivity: new Date().toISOString(),
+              };
+              const newThreads = [...prev];
+              newThreads.splice(idx, 1);
+              return [updatedThread, ...newThreads];
             }
-          }
-        },
-      )
-      // B. Lắng nghe thay đổi Conversation (Last Activity)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "conversations" },
-        () => {
-          if (activeBotIdForChat) fetchThreads();
-        },
-      )
-      // C. Lắng nghe tin nhắn mới -> Update Chat Frame
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "messages" },
-        async () => {
-          if (activeBotIdForChat && selectedThread) {
-            // [OPTIMIZATION] Debounce hoặc check ID trước khi reload
-            setTimeout(async () => {
-              try {
-                const history = await getMessagesAction(
-                  activeBotIdForChat,
-                  selectedThread.id,
-                );
-                setMessages(history as ZaloMessage[]);
-              } catch (e) {
-                console.error(e);
-              }
-            }, 500);
-          }
-        },
-      )
-      .subscribe();
+            return prev; // Nếu là thread mới chưa có trong list thì cần fetch lại
+          });
+        }
+      },
+    );
+
+    channel.subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeBotIdForChat, selectedThread, activeQrBotId]);
+  }, [activeBotId, activeQrBotId]);
+  // Lưu ý: Không đưa selectedThread vào deps để tránh reconnect socket liên tục.
+  // Ta sẽ dùng Ref để truy cập selectedThread bên trong callback.
 
-  // --- HANDLERS (PRESENCE INTEGRATED) ---
+  // Ref để tracking selected thread ID cho Realtime callback
+  const selectedThreadRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedThreadRef.current = selectedThread?.id || null;
+  }, [selectedThread]);
 
+  // --- HANDLERS ---
   const handleSwitchBot = (botId: string) => {
-    setActiveBotIdForChat(botId);
-    // [PRESENCE] Cập nhật bot đang xem
+    setActiveBotId(botId);
     updateStatus({ active_bot_id: botId });
   };
 
-  const handleSelectThread = (thread: ThreadInfo) => {
+  const handleSelectThread = async (thread: ThreadInfo) => {
     setSelectedThread(thread);
-    // [PRESENCE] Cập nhật thread đang xem
     updateStatus({ viewing_thread_id: thread.id });
-
-    // Fetch messages
-    if (activeBotIdForChat) {
-      getMessagesAction(activeBotIdForChat, thread.id)
-        .then((msgs) => setMessages(msgs as ZaloMessage[]))
-        .catch((e) => console.error(e));
+    if (activeBotId) {
+      // Clear messages cũ ngay lập tức để tránh hiện nhầm
+      setMessages([]);
+      try {
+        const msgs = await getMessagesAction(activeBotId, thread.id);
+        setMessages(msgs as ZaloMessage[]);
+      } catch (e) {
+        console.error(e);
+      }
     }
   };
 
   const handleSendMessage = async (content: string) => {
-    if (activeBotIdForChat && selectedThread && staffInfo) {
-      setIsSendingMessage(true);
-      // [PRESENCE] Bật trạng thái Typing
+    if (activeBotId && selectedThread && staffInfo) {
       updateStatus({ is_typing: true });
-
       try {
-        const res = await sendMessageAction(
+        await sendMessageAction(
           staffInfo.id,
-          activeBotIdForChat,
+          activeBotId,
           content,
           selectedThread.id,
           selectedThread.type,
         );
-        if (!res.success) {
-          alert("Gửi tin nhắn thất bại: " + res.error);
-        }
-      } catch (err: unknown) {
-        alert("Lỗi hệ thống: " + String(err));
+        // Không cần tự append tin nhắn vào list vì Realtime sẽ trả về event INSERT từ DB
+        // Điều này đảm bảo tính nhất quán (Consistency)
+      } catch (e) {
+        alert("Gửi lỗi: " + e);
       } finally {
-        setIsSendingMessage(false);
-        // [PRESENCE] Tắt trạng thái Typing
         updateStatus({ is_typing: false });
       }
     }
   };
 
-  // --- RESIZE LOGIC ---
-  const startResizing = (t: "MENU" | "CONV_LIST") => (e: React.MouseEvent) => {
-    e.preventDefault();
-    setResizingTarget(t);
-  };
+  // --- RESIZE LOGIC (Cho cả 3 thanh) ---
+  const startResize =
+    (target: "MENU" | "BOT_LIST" | "CONV_LIST") => (e: React.MouseEvent) => {
+      e.preventDefault();
+      setResizingTarget(target);
+    };
+
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
+    const handleMove = (e: MouseEvent) => {
       if (!resizingTarget || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+
       if (resizingTarget === "MENU") {
-        const w = e.clientX - rect.left;
-        if (w > 60 && w < 400) setMenuWidth(w);
+        const newW = Math.max(64, Math.min(x, 300));
+        setMenuWidth(newW);
+        setIsMenuExpanded(newW > 100);
+      } else if (resizingTarget === "BOT_LIST") {
+        // Bot List width = x - menuWidth
+        const newW = Math.max(64, Math.min(x - menuWidth, 400));
+        setBotListWidth(newW);
       } else if (resizingTarget === "CONV_LIST") {
-        const menuW = isMenuExpanded ? menuWidth : 64;
-        const w = e.clientX - rect.left - menuW;
-        if (w > 200 && w < 500) setConvListWidth(w);
+        // Conv List width = x - menuWidth - botListWidth
+        const newW = Math.max(200, Math.min(x - menuWidth - botListWidth, 600));
+        setConvListWidth(newW);
       }
     };
-    const handleMouseUp = () => setResizingTarget(null);
+    const handleUp = () => setResizingTarget(null);
+
     if (resizingTarget) {
-      window.addEventListener("mousemove", handleMouseMove);
-      window.addEventListener("mouseup", handleMouseUp);
+      window.addEventListener("mousemove", handleMove);
+      window.addEventListener("mouseup", handleUp);
     }
     return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
     };
-  }, [resizingTarget, isMenuExpanded, menuWidth]);
+  }, [resizingTarget, menuWidth, botListWidth]);
 
-  const filteredThreads = threads.filter((t) =>
-    t.name.toLowerCase().includes(searchTerm.toLowerCase()),
-  );
-
-  // [NEW] Hàm giả lập Scan (Nếu chưa implement logic scan thật)
-  const handleStartScan = () => {
-    console.log("Start scanning...");
-  };
-
+  // --- RENDER ---
   return (
     <div
-      className="flex h-screen w-full overflow-hidden bg-gray-900 font-sans text-gray-100"
+      className="flex h-screen w-full overflow-hidden bg-gray-900 text-gray-100 font-sans"
       ref={containerRef}
     >
-      {/* COLUMN 1: MAIN MENU */}
+      {/* 1. MAIN MENU */}
       <div
-        className="flex h-full flex-shrink-0 relative z-50 shadow-xl bg-gray-900"
-        style={{ width: isMenuExpanded ? menuWidth : 64 }}
+        className="relative flex-shrink-0 flex flex-col bg-gray-900 z-50 shadow-xl"
+        style={{ width: menuWidth }}
       >
         <MainMenu
           staffInfo={staffInfo}
           isExpanded={isMenuExpanded}
-          onToggleMenu={() => setIsMenuExpanded(!isMenuExpanded)}
+          onToggleMenu={() => {
+            const target = isMenuExpanded ? 64 : 240;
+            setMenuWidth(target);
+            setIsMenuExpanded(!isMenuExpanded);
+          }}
           currentView={currentView}
           onChangeView={setCurrentView}
-          customWidth={isMenuExpanded ? menuWidth : 64}
+          customWidth={menuWidth}
         />
         <div
-          className="w-1 h-full cursor-col-resize absolute right-0 top-0 hover:bg-blue-500/50 transition-colors z-[60]"
-          onMouseDown={startResizing("MENU")}
+          className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-blue-500/50 z-50"
+          onMouseDown={startResize("MENU")}
         />
       </div>
 
-      {/* CONTENT AREA */}
-      <div className="flex-1 flex overflow-hidden relative bg-gray-800">
-        {currentView === "manage" && (
+      {/* 2. BOT LIST PANEL (NEW) */}
+      <div
+        className="relative flex-shrink-0 flex flex-col bg-gray-900 z-40 border-r border-gray-800"
+        style={{ width: botListWidth }}
+      >
+        <BotListPanel
+          bots={bots}
+          selectedBotId={activeBotId}
+          onSelectBot={handleSwitchBot}
+          onRefresh={fetchBots}
+          width={botListWidth}
+        />
+        <div
+          className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-blue-500/50 z-50"
+          onMouseDown={startResize("BOT_LIST")}
+        />
+      </div>
+
+      {/* MAIN CONTENT AREA */}
+      <div className="flex-1 flex overflow-hidden min-w-0 bg-gray-800">
+        {currentView === "chat" ? (
+          <>
+            {/* 3. CONVERSATION LIST */}
+            <div
+              className="relative flex-shrink-0 h-full border-r border-gray-700 bg-gray-850 z-30"
+              style={{ width: convListWidth }}
+            >
+              <ConversationList
+                threads={threads}
+                selectedThread={selectedThread}
+                onSelectThread={handleSelectThread}
+                searchTerm={searchTerm}
+                onSearchChange={setSearchTerm}
+                onFetchThreads={fetchThreads}
+                isLoadingThreads={isLoadingThreads}
+                peers={peers}
+              />
+              <div
+                className="absolute right-0 top-0 w-1 h-full cursor-col-resize hover:bg-blue-500/50 z-50"
+                onMouseDown={startResize("CONV_LIST")}
+              />
+            </div>
+
+            {/* 4. CHAT FRAME */}
+            <div className="flex-1 flex min-w-0 relative">
+              <ChatFrame
+                thread={selectedThread}
+                messages={messages}
+                onSendMessage={handleSendMessage}
+                onToggleDetails={() =>
+                  setIsDetailsPanelOpen(!isDetailsPanelOpen)
+                }
+                isEchoBotEnabled={false}
+                onToggleEchoBot={() => {}}
+                isSendingMessage={false}
+                onSetError={(msg) => console.error(msg)}
+                userCache={userCache}
+              />
+              {isDetailsPanelOpen && (
+                <DetailsPanel
+                  botId={activeBotId}
+                  thread={selectedThread}
+                  onClose={() => setIsDetailsPanelOpen(false)}
+                  onRefreshThreads={fetchThreads}
+                  onClearSelectedThread={() => setSelectedThread(null)}
+                  threads={threads}
+                />
+              )}
+            </div>
+          </>
+        ) : currentView === "manage" ? (
           <BotLoginManager
             bots={bots}
             isLoading={false}
@@ -312,84 +436,17 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
             qrCodeData={qrCodeData}
             onSetActiveQrBotId={setActiveQrBotId}
           />
-        )}
-
-        {/* [NEW] CRM VIEW */}
-        {currentView === "crm" && (
+        ) : (
           <ManagementPanel
-            botId={activeBotIdForChat}
+            botId={activeBotId}
             selectedThread={selectedThread}
             threads={threads}
             onRefreshThreads={fetchThreads}
             userCache={userCache}
-            onStartManualScan={handleStartScan}
+            onStartManualScan={() => {}}
             isScanningAll={false}
             scanStatus="Idle"
           />
-        )}
-
-        {currentView === "chat" && (
-          <>
-            <div
-              className="flex-shrink-0 h-full relative border-r border-gray-700 bg-gray-800 z-40"
-              style={{ width: convListWidth }}
-            >
-              <ConversationList
-                threads={filteredThreads}
-                selectedThread={selectedThread}
-                onSelectThread={handleSelectThread} // Sử dụng handler đã bọc updateStatus
-                searchTerm={searchTerm}
-                onSearchChange={setSearchTerm}
-                onFetchThreads={fetchThreads}
-                isLoadingThreads={isLoadingThreads}
-                bots={bots}
-                activeBotId={activeBotIdForChat}
-                onSwitchBot={handleSwitchBot} // Sử dụng handler đã bọc updateStatus
-                peers={peers} // [NEW] Truyền danh sách đồng nghiệp
-              />
-              <div
-                className="w-1 h-full cursor-col-resize absolute right-0 top-0 hover:bg-blue-500/50 transition-colors z-[50]"
-                onMouseDown={startResizing("CONV_LIST")}
-              />
-            </div>
-
-            <div className="flex-1 flex min-w-0">
-              <ChatFrame
-                thread={selectedThread}
-                messages={messages}
-                onSendMessage={handleSendMessage} // Sử dụng handler đã bọc updateStatus
-                onToggleDetails={() =>
-                  setIsDetailsPanelOpen(!isDetailsPanelOpen)
-                }
-                isEchoBotEnabled={isEchoBotEnabled}
-                onToggleEchoBot={() => setIsEchoBotEnabled(!isEchoBotEnabled)}
-                isSendingMessage={isSendingMessage}
-                onSetError={(msg) => console.error(msg)}
-                userCache={userCache}
-              />
-
-              {isDetailsPanelOpen && (
-                <DetailsPanel
-                  botId={activeBotIdForChat}
-                  thread={selectedThread}
-                  onClose={() => setIsDetailsPanelOpen(false)}
-                  onRefreshThreads={() => {}}
-                  onClearSelectedThread={() => setSelectedThread(null)}
-                  threads={threads}
-                />
-              )}
-            </div>
-          </>
-        )}
-
-        {currentView === "setting" && (
-          <div className="flex-1 flex flex-col items-center justify-center text-gray-500 bg-gray-900">
-            <IconCog className="w-20 h-20 mb-4 opacity-20" />
-            <h2 className="text-xl font-bold text-gray-400">
-              Cài đặt Hệ thống
-            </h2>
-            <p>Tính năng đang phát triển...</p>
-          </div>
         )}
       </div>
     </div>

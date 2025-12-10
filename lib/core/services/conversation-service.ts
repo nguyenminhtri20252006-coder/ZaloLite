@@ -1,8 +1,8 @@
 /**
  * lib/core/services/conversation-service.ts
- * [CORE SERVICE - V2]
+ * [CORE SERVICE - V2.1]
  * Logic: Unified Conversation & Customer Management.
- * Update: Sử dụng 'unknown' cho dữ liệu raw JSONB.
+ * [UPDATED] Sử dụng UPSERT để đảm bảo tính duy nhất của Conversation ID (Tránh duplicate message).
  */
 
 import supabase from "@/lib/supabaseServer";
@@ -10,6 +10,7 @@ import supabase from "@/lib/supabaseServer";
 export class ConversationService {
   /**
    * Đảm bảo Conversation tồn tại và Bot có liên kết với nó.
+   * Sử dụng UPSERT (ON CONFLICT) để tránh race condition.
    */
   static async ensureConversation(
     botId: string,
@@ -20,72 +21,61 @@ export class ConversationService {
     rawData: unknown = {},
   ): Promise<string | null> {
     try {
-      // 1. Kiểm tra Mapping (Bot đã biết thread này chưa?)
-      const { data: mapping } = await supabase
-        .from("zalo_conversation_mappings")
-        .select("conversation_id")
-        .eq("bot_id", botId)
-        .eq("external_thread_id", threadId)
-        .single();
-
-      if (mapping) {
-        return mapping.conversation_id;
-      }
-
+      // [DEBUG]
       console.log(
-        `[ConvService] New conversation for Bot ${botId}: ${threadId}`,
+        `[ConvService] 🛠 Ensuring GlobalID="${threadId}" for Bot ${botId}`,
       );
 
-      // 2. Nếu chưa có Mapping, kiểm tra bảng Global
-      let conversationId: string | null = null;
-
-      const { data: existingConv } = await supabase
+      const { data: convData, error: convError } = await supabase
         .from("conversations")
-        .select("id")
-        .eq("global_id", threadId)
-        .single();
-
-      if (existingConv) {
-        conversationId = existingConv.id;
-      } else {
-        // 3. Tạo mới Conversation Global
-        const { data: newConv, error: createError } = await supabase
-          .from("conversations")
-          .insert({
+        .upsert(
+          {
             global_id: threadId,
             type: isGroup ? "group" : "user",
             name: displayName,
             avatar: avatar,
-            raw_data: rawData, // Type unknown được chấp nhận bởi Supabase client (as JSON)
-          })
-          .select("id")
-          .single();
+            raw_data: rawData, // Update metadata mới nhất
+            last_activity_at: new Date().toISOString(),
+          },
+          { onConflict: "global_id" }, // Quan trọng: Dựa vào cột UNIQUE này
+        )
+        .select("id, global_id") // Select cả global_id để so sánh
+        .single();
 
-        if (createError || !newConv) {
-          console.error("[ConvService] Create Global Conv Error:", createError);
-          return null;
+      if (convError || !convData) {
+        console.error(`[ConvService] ❌ Upsert Error:`, convError);
+        // Fallback Select
+        const { data: fallback } = await supabase
+          .from("conversations")
+          .select("id")
+          .eq("global_id", threadId)
+          .single();
+        if (fallback) {
+          console.log(`[ConvService] ⚠️ Fallback found ID: ${fallback.id}`);
+          return fallback.id;
         }
-        conversationId = newConv.id;
+        return null;
       }
 
-      // 4. Tạo Mapping cho Bot hiện tại
-      const { error: mapError } = await supabase
-        .from("zalo_conversation_mappings")
-        .insert({
+      console.log(
+        `[ConvService] ✅ Resolved UUID: ${convData.id} (Matches GlobalID: "${convData.global_id}")`,
+      );
+
+      // Mapping Logic (Giữ nguyên, chỉ thêm log nếu cần)
+      await supabase.from("zalo_conversation_mappings").upsert(
+        {
           bot_id: botId,
-          conversation_id: conversationId,
+          conversation_id: convData.id,
           external_thread_id: threadId,
           status: { status: "active" },
-        });
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "bot_id, conversation_id" },
+      );
 
-      if (mapError) {
-        console.error("[ConvService] Create Mapping Error:", mapError);
-        return conversationId;
-      }
-
-      return conversationId;
+      return convData.id;
     } catch (error) {
-      console.error("[ConvService] ensureConversation Exception:", error);
+      console.error("[ConvService] Exception:", error);
       return null;
     }
   }
@@ -101,57 +91,50 @@ export class ConversationService {
     rawData: unknown = {},
   ): Promise<string | null> {
     try {
-      // 1. Check Mapping
-      const { data: mapping } = await supabase
-        .from("zalo_customer_mappings")
-        .select("customer_id")
-        .eq("bot_id", botId)
-        .eq("external_user_id", zaloUserId)
-        .single();
-
-      if (mapping) return mapping.customer_id;
-
-      // 2. Check Global Table
-      let customerId: string | null = null;
-
-      const { data: existingCust } = await supabase
+      // 1. UPSERT Customer Global
+      const { data: custData, error: custError } = await supabase
         .from("customers")
-        .select("id")
-        .eq("global_id", zaloUserId)
-        .single();
-
-      if (existingCust) {
-        customerId = existingCust.id;
-      } else {
-        // 3. Create Global Customer
-        const { data: newCust, error: createError } = await supabase
-          .from("customers")
-          .insert({
+        .upsert(
+          {
             global_id: zaloUserId,
             display_name: displayName,
             avatar: avatar,
             raw_data: rawData,
-          })
-          .select("id")
-          .single();
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "global_id" },
+        )
+        .select("id")
+        .single();
 
-        if (createError || !newCust) {
-          console.error(
-            "[ConvService] Create Global Customer Error:",
-            createError,
-          );
-          return null;
-        }
-        customerId = newCust.id;
+      if (custError || !custData) {
+        console.error(
+          `[ConvService] Upsert Customer Error (${zaloUserId}):`,
+          custError?.message,
+        );
+        // Fallback select
+        const { data: fallback } = await supabase
+          .from("customers")
+          .select("id")
+          .eq("global_id", zaloUserId)
+          .single();
+        if (fallback) return fallback.id;
+        return null;
       }
 
-      // 4. Create Mapping
-      await supabase.from("zalo_customer_mappings").insert({
-        bot_id: botId,
-        customer_id: customerId,
-        external_user_id: zaloUserId,
-        status: { is_friend: false },
-      });
+      const customerId = custData.id;
+
+      // 2. UPSERT Mapping
+      await supabase.from("zalo_customer_mappings").upsert(
+        {
+          bot_id: botId,
+          customer_id: customerId,
+          external_user_id: zaloUserId,
+          status: { is_friend: false }, // Cần logic check friend thật sau này
+          last_interaction_at: new Date().toISOString(),
+        },
+        { onConflict: "bot_id, customer_id" },
+      );
 
       return customerId;
     } catch (error) {

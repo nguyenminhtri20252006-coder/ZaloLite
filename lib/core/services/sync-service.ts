@@ -84,47 +84,42 @@ export class SyncService {
       const rawGroupsData: any = await api.getAllGroups();
       const groupIds = Object.keys(rawGroupsData.gridVerMap || {});
 
-      console.log(`[SyncService] Found ${groupIds.length} groups.`);
+      console.log(`[Sync] 📦 Bot ${botId} found ${groupIds.length} groups.`);
+      if (groupIds.length > 0) {
+        console.log(
+          `[Sync] 🔍 Sample Group IDs (First 3):`,
+          groupIds.slice(0, 3),
+        );
+      }
 
-      // Lấy thông tin chi tiết từng nhóm (Batch processing nên được cân nhắc nếu list quá lớn)
-      // Hiện tại ta loop qua và dùng getGroupInfo
-      // Tuy nhiên getAllGroups không trả về tên nhóm ngay, cần gọi getGroupInfo
-
-      // Chunking: Lấy thông tin 10 nhóm một lần để tránh rate limit
       const chunkSize = 10;
       for (let i = 0; i < groupIds.length; i += chunkSize) {
         const chunkIds = groupIds.slice(i, i + chunkSize);
 
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const groupInfos: any = await api.getGroupInfo(chunkIds);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const groupInfos: any = await api.getGroupInfo(chunkIds);
 
-          for (const groupId of chunkIds) {
-            const info = groupInfos.gridInfoMap?.[groupId];
-            if (!info) continue;
+        for (const groupId of chunkIds) {
+          const info = groupInfos.gridInfoMap?.[groupId];
+          if (!info) continue;
 
-            const name = info.name || `Group ${groupId}`;
-            const avatar = info.avatar || "";
+          // [DEBUG] Log ID trước khi lưu
+          console.log(
+            `[Sync] 💾 Saving Group: ID="${groupId}" | Name="${info.name}"`,
+          );
 
-            // Tạo Conversation (Loại Group)
-            await ConversationService.ensureConversation(
-              botId,
-              groupId,
-              true, // isGroup = true
-              name,
-              avatar,
-              info, // raw data (chứa admins, members list...)
-            );
-          }
-        } catch (e) {
-          console.error(
-            `[SyncService] Failed to fetch info for chunk ${i}:`,
-            e,
+          await ConversationService.ensureConversation(
+            botId,
+            groupId, // Global ID từ Sync
+            true,
+            info.name || `Group ${groupId}`,
+            info.avatar || "",
+            info,
           );
         }
       }
     } catch (error) {
-      console.error(`[SyncService] Sync groups error:`, error);
+      console.error(`[Sync] Sync groups error:`, error);
       throw error;
     }
   }
