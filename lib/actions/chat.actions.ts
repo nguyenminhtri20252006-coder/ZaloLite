@@ -187,49 +187,16 @@ export async function sendMessageAction(
 
     const isGroup = type === ThreadType.Group;
 
-    // 1. Gửi tin nhắn qua Zalo API
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result: any = await sender.sendText(content, threadId, isGroup);
-
-    // Fallback nếu api không trả msgId ngay lập tức
-    const zaloMsgId = result.msgId || result.id || `sent_${Date.now()}`;
-
-    // 2. Đảm bảo Conversation & Mapping tồn tại
-    const conversationUUID = await ConversationService.ensureConversation(
-      botId,
-      threadId,
-      isGroup,
-      "Unknown Conversation",
+    console.log(
+      `[ChatAction] Staff ${staffId} sending msg to ${threadId} via Bot ${botId}`,
     );
 
-    if (conversationUUID) {
-      // 3. Lưu tin nhắn vào DB
-      const { error } = await supabase.from("messages").insert({
-        conversation_id: conversationUUID,
-        sender_type: "staff_on_bot",
-        sender_id: botId,
-        staff_id: staffId,
-        bot_ids: [botId],
-        zalo_msg_id: String(zaloMsgId),
-        content: { type: "text", text: content },
-        raw_content: result,
-        msg_type: "text",
-        sent_at: new Date().toISOString(),
-      });
+    // 1. Gửi tin nhắn qua Zalo API
+    // Kết quả trả về chứa msgId, nhưng ta KHÔNG dùng nó để insert DB ở đây nữa.
+    await sender.sendText(content, threadId, isGroup);
 
-      // 4. Update last_activity_at để Conversation nhảy lên đầu list
-      await supabase
-        .from("conversations")
-        .update({ last_activity_at: new Date().toISOString() })
-        .eq("id", conversationUUID);
-
-      if (error)
-        console.error(
-          "[ChatAction] Failed to save sent message:",
-          error.message,
-        );
-    }
-
+    // 2. Return success ngay lập tức
+    // Bot Runtime sẽ tự bắt sự kiện 'message' (isSelf: true) và lưu vào DB qua Pipeline
     return { success: true };
   } catch (error: unknown) {
     const err = error instanceof Error ? error.message : String(error);
@@ -259,6 +226,7 @@ export async function sendStickerAction(
       threadId,
       type === ThreadType.Group ? 1 : 0,
     );
+    // Tương tự, không lưu DB thủ công
     return { success: true };
   } catch (e: unknown) {
     return {
@@ -268,9 +236,6 @@ export async function sendStickerAction(
   }
 }
 
-/**
- * Set Echo State (Placeholder)
- */
 export async function setEchoBotStateAction(isEnabled: boolean) {
   console.log("Set Echo State:", isEnabled);
 }
