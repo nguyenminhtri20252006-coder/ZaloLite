@@ -152,12 +152,12 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     threadsRef.current = threads;
   }, [threads]);
 
-  const selectedThreadRef = useRef<string | null>(null);
+  const selectedThreadRef = useRef<ThreadInfo | null>(null);
   useEffect(() => {
-    selectedThreadRef.current = selectedThread?.id || null;
+    selectedThreadRef.current = selectedThread;
   }, [selectedThread]);
 
-  // --- REALTIME LOGIC ---
+  // --- REALTIME ENGINE ---
   useEffect(() => {
     const channel = supabase.channel("realtime-messages");
 
@@ -187,37 +187,46 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
       (payload) => {
         const newMsgRow = payload.new;
         const botIds = newMsgRow.bot_ids as string[];
+        // UUID của hội thoại trong DB
         const conversationUUID = newMsgRow.conversation_id;
 
+        // 1. Filter: Chỉ xử lý nếu tin nhắn thuộc Bot đang active
         if (!activeBotId || !botIds || !botIds.includes(activeBotId)) return;
 
-        // [LOGIC FIX] Tìm thread trong list hiện tại dựa trên UUID
-        // threadsRef.current chứa list threads với field 'uuid' mới thêm
-        const targetThread = threadsRef.current.find(
-          (t) => t.uuid === conversationUUID,
-        );
-
-        if (targetThread) {
-          // Nếu thread đã tồn tại trên UI -> Dùng ID Hash của nó để map tin nhắn
-          const uiMsg = convertDbMessageToUi(newMsgRow, targetThread.id);
+        // 2. Logic cập nhật UI Chat Frame (QUAN TRỌNG)
+        // Thay vì so sánh threadId (Zalo ID), ta so sánh UUID của DB
+        if (
+          selectedThreadRef.current &&
+          selectedThreadRef.current.uuid === conversationUUID
+        ) {
           console.log(
-            `[Realtime] Match Thread: ${targetThread.name} (Hash: ${targetThread.id})`,
+            `[Realtime] 🎯 Msg for SELECTED thread (UUID match): ${conversationUUID}`,
+          );
+
+          // Convert message, truyền ID Hash của thread đang chọn để đảm bảo UI khớp
+          const uiMsg = convertDbMessageToUi(
+            newMsgRow,
+            selectedThreadRef.current.id,
           );
 
           setMessages((prev) => {
-            // Chỉ append nếu đúng hội thoại đang mở
-            if (selectedThreadRef.current === uiMsg.threadId) {
-              // Check trùng lặp lần cuối ở client
-              if (prev.some((m) => m.data.msgId === uiMsg.data.msgId))
-                return prev;
-              return [...prev, uiMsg];
-            }
-            return prev;
+            if (prev.some((m) => m.data.msgId === uiMsg.data.msgId))
+              return prev;
+            return [...prev, uiMsg];
           });
+        }
 
-          // Re-order thread list
+        // 3. Logic cập nhật Sidebar (Thread List)
+        // Tìm xem thread này đã có trong list chưa (bằng UUID)
+        const existingThreadIndex = threadsRef.current.findIndex(
+          (t) => t.uuid === conversationUUID,
+        );
+
+        if (existingThreadIndex > -1) {
+          // Case A: Thread đã có trong list -> Đẩy lên đầu & Update time
+          console.log(`[Realtime] 🔄 Updating existing thread list...`);
           setThreads((prev) => {
-            const idx = prev.findIndex((t) => t.id === targetThread.id);
+            const idx = prev.findIndex((t) => t.uuid === conversationUUID);
             if (idx > -1) {
               const updated = {
                 ...prev[idx],
@@ -230,10 +239,9 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
             return prev;
           });
         } else {
-          // Nếu thread chưa có (VD: tin nhắn từ người lạ mới tinh chưa sync)
-          // Refresh lại list để lấy thread mới từ DB
+          // Case B: Thread mới (chưa có trong list) -> Fetch lại
           console.log(
-            "[Realtime] 🆕 New thread UUID detected, fetching list...",
+            `[Realtime] 🆕 New thread detected (UUID: ${conversationUUID}), fetching list...`,
           );
           fetchThreads();
         }
@@ -242,10 +250,9 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
 
     channel.subscribe();
     return () => {
-      console.log("[Realtime] 🔌 Disconnecting...");
       supabase.removeChannel(channel);
     };
-  }, [activeBotId, activeQrBotId]); // Không cần dependency threads hay selectedThread vì dùng Ref
+  }, [activeBotId, activeQrBotId]);
 
   const handleSwitchBot = (botId: string) => {
     setActiveBotId(botId);
@@ -419,7 +426,7 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
             await deleteBotAction(id);
             fetchBots();
           }}
-          onStartLogin={async (id) => {
+          onStartLogin={async (id: string) => {
             setActiveQrBotId(id);
             await startBotLoginAction(id);
           }}
