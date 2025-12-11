@@ -31,7 +31,7 @@ export class MessagePipeline {
 
       // [DEBUG]
       console.log(
-        `[Pipeline] 📨 Processing Msg from Bot ${botId} | Thread(Num): ${numericThreadId} | Sender(Num): ${numericSenderId}`,
+        `[Pipeline] 📨 Processing Msg from Bot ${botId} | Thread(Num): ${numericThreadId} | MsgId: ${message.msgId}`,
       );
 
       // --- BƯỚC 1: GIẢI QUYẾT CONVERSATION UUID ---
@@ -50,7 +50,8 @@ export class MessagePipeline {
         let globalHashId = "";
         let name = message.isGroup ? `Group ${numericThreadId}` : "Unknown";
         let avatar = "";
-        let rawInfo = {};
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let rawInfo: any = {};
 
         try {
           if (message.isGroup) {
@@ -110,8 +111,6 @@ export class MessagePipeline {
 
       if (message.isSelf) {
         // Nếu là chính mình (Bot) -> Sender là Staff (hoặc Bot System)
-        // Tạm thời gán senderUUID = botId (Vì Bot cũng là một thực thể trong hệ thống)
-        // TODO: Nếu có staff_id trong context gửi đi, nên dùng staff_id
         senderType = "staff_on_bot";
         senderUUID = botId; // UUID của Bot trong bảng zalo_bots
       } else {
@@ -171,10 +170,10 @@ export class MessagePipeline {
         // [CRITICAL FIX] Sử dụng UUID chuẩn hóa thay vì Raw ID
         sender_id: senderUUID,
         sender_type: senderType,
-        staff_id: senderType === "staff_on_bot" ? null : null, // TODO: Map staff nếu có
+        staff_id: null,
 
         content: message.content,
-        raw_content: rawMsg, // Lưu raw để debug
+        raw_content: rawMsg,
         msg_type: msgType,
         sent_at: new Date(message.timestamp).toISOString(),
       });
@@ -206,7 +205,15 @@ export class MessagePipeline {
               .from("messages")
               .update({ bot_ids: uniqueBots })
               .eq("id", existingMsg.id);
+
+            console.log(
+              `[Pipeline] 🔗 Merged Bot ${botId} into Msg ${message.msgId}`,
+            );
           }
+        } else {
+          console.warn(
+            `[Pipeline] ⚠️ Duplicate error but msg not found? MsgId: ${message.msgId}`,
+          );
         }
       } else {
         console.error(
