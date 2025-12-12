@@ -11,7 +11,19 @@ export type BotPermissionType = "chat" | "auth" | "view_only";
 export type SenderType = "customer" | "staff_on_bot";
 export type ConversationType = "user" | "group";
 
-// --- 1. STAFF & PERMISSIONS ---
+// --- 7. WORK SESSIONS (TRACKING) ---
+export interface WorkSession {
+  id: number; // BIGINT
+  staff_id: string;
+  started_at: string;
+  last_ping_at: string;
+  ended_at: string | null;
+  ip_address?: string | null;
+  user_agent?: string | null;
+  created_at: string;
+}
+
+// ... (Giữ nguyên các type khác)
 export interface StaffAccount {
   id: string; // UUID
   username: string;

@@ -102,3 +102,8 @@ export function verifySessionToken<T>(token: string): T | null {
     return null;
   }
 }
+
+// [NEW] Hash token để lưu định danh session vào DB (SHA256)
+export function hashSessionToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}

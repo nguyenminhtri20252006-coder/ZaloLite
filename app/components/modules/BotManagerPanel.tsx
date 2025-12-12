@@ -51,17 +51,19 @@ export function BotManagerPanel({
   isLoading,
   onRefresh,
   onDeleteBot,
-  onStartLogin, // [FIX] Thêm prop này để khớp với BotInterface
+  onStartLogin,
   activeQrBotId,
   qrCodeData,
+  userRole, // [NEW PROP]
 }: {
   bots: ZaloBot[];
   isLoading: boolean;
   onRefresh: () => void;
   onDeleteBot: (id: string) => void;
-  onStartLogin: (id: string) => Promise<void>; // [FIX] Định nghĩa type rõ ràng
+  onStartLogin: (id: string) => Promise<void>;
   activeQrBotId: string | null;
   qrCodeData: string | null;
+  userRole: string; // "admin" | "staff"
 }) {
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -71,9 +73,10 @@ export function BotManagerPanel({
 
   // Sync Settings State
   const [syncInterval, setSyncInterval] = useState(0);
-  const [editingSyncId, setEditingSyncId] = useState<string | null>(null); // [FIX] Bổ sung state thiếu
+  const [editingSyncId, setEditingSyncId] = useState<string | null>(null);
 
   const selectedBot = bots.find((b) => b.id === selectedBotId);
+  const isAdmin = userRole === "admin";
 
   // --- Actions ---
 
@@ -159,12 +162,14 @@ export function BotManagerPanel({
                 className={`w-5 h-5 ${isLoading ? "animate-spin" : ""}`}
               />
             </button>
-            <button
-              onClick={() => setShowAddModal(true)}
-              className="p-1.5 bg-blue-600 rounded hover:bg-blue-500 text-white shadow"
-            >
-              <IconUserPlus className="w-5 h-5" />
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => setShowAddModal(true)}
+                className="p-1.5 bg-blue-600 rounded hover:bg-blue-500 text-white shadow"
+              >
+                <IconUserPlus className="w-5 h-5" />
+              </button>
+            )}
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin">
@@ -235,15 +240,18 @@ export function BotManagerPanel({
                   </span>
                 </div>
               </div>
-              <button
-                onClick={() => {
-                  if (confirm("Xóa Bot?")) onDeleteBot(selectedBot.id);
-                  if (selectedBotId === selectedBot.id) setSelectedBotId(null);
-                }}
-                className="text-red-400 hover:bg-red-900/30 p-2 rounded border border-red-900/50 flex gap-2 items-center text-sm transition-colors"
-              >
-                <IconClose className="w-4 h-4" /> Xóa Bot
-              </button>
+              {isAdmin && (
+                <button
+                  onClick={() => {
+                    if (confirm("Xóa Bot?")) onDeleteBot(selectedBot.id);
+                    if (selectedBotId === selectedBot.id)
+                      setSelectedBotId(null);
+                  }}
+                  className="text-red-400 hover:bg-red-900/30 p-2 rounded border border-red-900/50 flex gap-2 items-center text-sm transition-colors"
+                >
+                  <IconClose className="w-4 h-4" /> Xóa Bot
+                </button>
+              )}
             </div>
 
             {/* Login & QR Section */}
@@ -276,12 +284,14 @@ export function BotManagerPanel({
                       >
                         Lấy mã QR
                       </button>
-                      <button
-                        onClick={() => retryBotLoginAction(selectedBot.id)}
-                        className="px-6 py-2 bg-gray-700 rounded text-white font-medium hover:bg-gray-600"
-                      >
-                        Thử lại Token cũ
-                      </button>
+                      {isAdmin && (
+                        <button
+                          onClick={() => retryBotLoginAction(selectedBot.id)}
+                          className="px-6 py-2 bg-gray-700 rounded text-white font-medium hover:bg-gray-600"
+                        >
+                          Thử lại Token cũ
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -325,74 +335,80 @@ export function BotManagerPanel({
               </div>
 
               {/* Config Card */}
-              <div className="bg-gray-900/50 border border-gray-700 rounded-xl p-5">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="font-bold text-white flex items-center gap-2">
-                    <IconCog className="w-5 h-5 text-purple-400" /> Cấu hình
-                  </h3>
-                  <button
-                    onClick={() => {
-                      setEditingSyncId(
-                        editingSyncId === selectedBot.id
-                          ? null
-                          : selectedBot.id,
-                      );
-                      setSyncInterval(selectedBot.auto_sync_interval || 0);
-                    }}
-                    className="text-xs text-gray-400 hover:text-white underline"
-                  >
-                    {editingSyncId === selectedBot.id ? "Hủy" : "Sửa"}
-                  </button>
-                </div>
+              {isAdmin && (
+                <div className="bg-gray-900/50 border border-gray-700 rounded-xl p-5">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="font-bold text-white flex items-center gap-2">
+                      <IconCog className="w-5 h-5 text-purple-400" /> Cấu hình
+                    </h3>
+                    <button
+                      onClick={() => {
+                        setEditingSyncId(
+                          editingSyncId === selectedBot.id
+                            ? null
+                            : selectedBot.id,
+                        );
+                        setSyncInterval(selectedBot.auto_sync_interval || 0);
+                      }}
+                      className="text-xs text-gray-400 hover:text-white underline"
+                    >
+                      {editingSyncId === selectedBot.id ? "Hủy" : "Sửa"}
+                    </button>
+                  </div>
 
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-2">
-                      Tự động đồng bộ (phút)
-                    </label>
-                    {editingSyncId === selectedBot.id ? (
-                      <div className="flex gap-2 animate-fade-in">
-                        <select
-                          className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500"
-                          value={syncInterval}
-                          onChange={(e) =>
-                            setSyncInterval(Number(e.target.value))
-                          }
-                        >
-                          <option value={0}>Tắt</option>
-                          <option value={15}>15 phút</option>
-                          <option value={30}>30 phút</option>
-                          <option value={60}>60 phút</option>
-                        </select>
-                        <button
-                          onClick={() => handleSaveSettings(selectedBot.id)}
-                          className="px-4 bg-purple-600 hover:bg-purple-500 rounded text-white text-sm font-bold transition-colors"
-                        >
-                          Lưu
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="text-sm text-white font-medium bg-gray-800 p-2 rounded border border-gray-700">
-                        {selectedBot.auto_sync_interval
-                          ? `${selectedBot.auto_sync_interval} phút`
-                          : "Đang tắt"}
-                      </div>
-                    )}
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-2">
+                        Tự động đồng bộ (phút)
+                      </label>
+                      {editingSyncId === selectedBot.id ? (
+                        <div className="flex gap-2 animate-fade-in">
+                          <select
+                            className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500"
+                            value={syncInterval}
+                            onChange={(e) =>
+                              setSyncInterval(Number(e.target.value))
+                            }
+                          >
+                            <option value={0}>Tắt</option>
+                            <option value={15}>15 phút</option>
+                            <option value={30}>30 phút</option>
+                            <option value={60}>60 phút</option>
+                          </select>
+                          <button
+                            onClick={() => handleSaveSettings(selectedBot.id)}
+                            className="px-4 bg-purple-600 hover:bg-purple-500 rounded text-white text-sm font-bold transition-colors"
+                          >
+                            Lưu
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-sm text-white font-medium bg-gray-800 p-2 rounded border border-gray-700">
+                          {selectedBot.auto_sync_interval
+                            ? `${selectedBot.auto_sync_interval} phút`
+                            : "Đang tắt"}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-gray-500">
-            <IconUserPlus className="w-16 h-16 opacity-20 mb-4" />
-            <p>Chọn một Bot hoặc thêm mới để bắt đầu.</p>
+            {isAdmin ? (
+              <IconUserPlus className="w-16 h-16 opacity-20 mb-4" />
+            ) : (
+              <div className="w-16 h-16 opacity-20 mb-4 bg-gray-700 rounded-full" />
+            )}
+            <p>Chọn một Bot để bắt đầu.</p>
           </div>
         )}
       </div>
 
-      {/* Modal Add Bot */}
-      {showAddModal && (
+      {/* Modal Add Bot (Admin Only) */}
+      {showAddModal && isAdmin && (
         <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-gray-800 border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-up">
             <div className="p-4 border-b border-gray-700 flex justify-between bg-gray-900">

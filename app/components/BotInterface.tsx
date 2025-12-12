@@ -34,6 +34,7 @@ import {
 } from "../../lib/actions/chat.actions";
 import supabase from "../../lib/supabaseClient";
 import { usePresence } from "../../lib/hooks/usePresence";
+import { useWorkSession } from "../../lib/hooks/useWorkSession"; // [NEW IMPORT]
 
 // Helper: Convert DB Message -> UI ZaloMessage (Append Mode)
 const convertDbMessageToUi = (
@@ -72,6 +73,9 @@ type BotInterfaceProps = {
 };
 
 export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
+  // [NEW] Kích hoạt tracking session
+  useWorkSession();
+
   const [currentView, setCurrentView] = useState<ViewState>("chat");
 
   // Layout Widths
@@ -110,6 +114,10 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     try {
       const data = await getBotsAction();
       setBots(data);
+      // Nếu bot đang chọn không còn trong danh sách (do mất quyền), reset
+      if (activeBotId && !data.find((b) => b.id === activeBotId)) {
+        setActiveBotId(null);
+      }
       if (!activeBotId && data.length > 0) {
         const active =
           data.find((b) => b.status?.state === "LOGGED_IN") || data[0];
@@ -166,9 +174,12 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
       { event: "UPDATE", schema: "public", table: "zalo_bots" },
       (payload) => {
         const updatedBot = payload.new as ZaloBot;
-        setBots((prev) =>
-          prev.map((b) => (b.id === updatedBot.id ? updatedBot : b)),
-        );
+        // Chỉ update nếu bot này có trong danh sách được phép xem
+        setBots((prev) => {
+          if (!prev.some((b) => b.id === updatedBot.id)) return prev;
+          return prev.map((b) => (b.id === updatedBot.id ? updatedBot : b));
+        });
+
         if (updatedBot.id === activeQrBotId) {
           if (updatedBot.status?.qr_code)
             setQrCodeData(updatedBot.status.qr_code);
@@ -432,8 +443,9 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
           }}
           activeQrBotId={activeQrBotId}
           qrCodeData={qrCodeData}
+          userRole={staffInfo?.role || "staff"}
         />
-      ) : currentView === "staff" ? (
+      ) : currentView === "staff" && staffInfo?.role === "admin" ? (
         <StaffManagerPanel />
       ) : (
         <ManagementPanel

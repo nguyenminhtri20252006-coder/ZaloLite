@@ -11,27 +11,10 @@ import {
   IconLogout,
   IconMenuToggle,
   IconChatBubble,
-  IconCog,
+  IconRobot,
   IconUsers,
 } from "@/app/components/ui/Icons";
 import { staffLogoutAction } from "@/lib/actions/staff.actions";
-
-// Icon Robot
-const IconRobot = ({ className }: { className: string }) => (
-  <svg
-    xmlns="http://www.w3.org/2000/svg"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    className={className}
-  >
-    <path
-      fillRule="evenodd"
-      d="M3 6a3 3 0 013-3h12a3 3 0 013 3v12a3 3 0 01-3 3H6a3 3 0 01-3-3V6zm4.5 7.5a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0v-2.25a.75.75 0 01.75-.75zm9 0a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0v-2.25a.75.75 0 01.75-.75zM9 13.5a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0v-2.25a.75.75 0 01.75-.75zm4.5 0a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0v-2.25a.75.75 0 01.75-.75z"
-      clipRule="evenodd"
-    />
-    <path d="M12 9a.75.75 0 01.75-.75h.008a.75.75 0 01.75.75v.008a.75.75 0 01-.75.75H12.75a.75.75 0 01-.75-.75V9z" />
-  </svg>
-);
 
 // Component TabButton & ActionButton (Giữ nguyên)
 const TabButton = ({
@@ -123,6 +106,8 @@ export function MainMenu({
     if (confirm("Bạn có chắc chắn muốn đăng xuất?")) await staffLogoutAction();
   };
 
+  const isAdmin = staffInfo?.role === "admin";
+
   return (
     <div
       className="flex h-full flex-col bg-gray-900 border-r border-gray-800 py-4 flex-shrink-0 overflow-hidden relative"
@@ -177,14 +162,16 @@ export function MainMenu({
           isExpanded={isExpanded}
         />
 
-        {/* Chỉ Admin mới thấy Tab Nhân viên? Tạm thời hiển thị cho cả staff để họ đổi mk */}
-        <TabButton
-          icon={IconUser}
-          label="Quản lý Nhân viên"
-          isActive={currentView === "staff"}
-          onClick={() => onChangeView("staff")}
-          isExpanded={isExpanded}
-        />
+        {/* Chỉ Admin mới thấy Tab Quản lý Nhân viên */}
+        {isAdmin && (
+          <TabButton
+            icon={IconUser}
+            label="Quản lý Nhân viên"
+            isActive={currentView === "staff"}
+            onClick={() => onChangeView("staff")}
+            isExpanded={isExpanded}
+          />
+        )}
 
         <TabButton
           icon={IconUsers}

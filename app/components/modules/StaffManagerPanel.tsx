@@ -7,7 +7,11 @@ import {
   updateStaffAction,
   deleteStaffAction,
   changeStaffPasswordAction,
+  getStaffBotPermissionsAction, // [NEW]
+  assignBotPermissionAction, // [NEW]
+  revokeBotPermissionAction, // [NEW]
 } from "@/lib/actions/staff.actions";
+import { getBotsAction } from "@/lib/actions/bot.actions"; // [NEW] Lấy danh sách Bot để hiển thị
 import { Avatar } from "@/app/components/ui/Avatar";
 import {
   IconUserPlus,
@@ -15,18 +19,24 @@ import {
   IconCog,
   IconClose,
   IconCheck,
+  IconRobot, // [NEW] Icon cho nút phân quyền
 } from "@/app/components/ui/Icons";
+import { ZaloBot } from "@/lib/types/database.types";
 
 export function StaffManagerPanel() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [staffList, setStaffList] = useState<any[]>([]);
+  const [bots, setBots] = useState<ZaloBot[]>([]); // [NEW] Danh sách tất cả bot
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [modalMode, setModalMode] = useState<"CREATE" | "EDIT" | "PASSWORD">(
-    "CREATE",
-  );
+
+  // Modes: CREATE, EDIT, PASSWORD, PERMISSIONS
+  const [modalMode, setModalMode] = useState<
+    "CREATE" | "EDIT" | "PASSWORD" | "PERMISSIONS"
+  >("CREATE");
 
   // Form State
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [selectedStaff, setSelectedStaff] = useState<any>(null);
   const [formData, setFormData] = useState({
     username: "",
@@ -36,11 +46,21 @@ export function StaffManagerPanel() {
     phone: "",
   });
 
-  const fetchStaff = async () => {
+  // Permission State [NEW]
+  // Map<botId, permissionType> (Nếu không có trong map nghĩa là chưa được gán)
+  const [staffPermissions, setStaffPermissions] = useState<
+    Record<string, string>
+  >({});
+
+  const fetchStaffAndBots = async () => {
     setIsLoading(true);
     try {
-      const data = await getAllStaffAction();
-      setStaffList(data || []);
+      const [staffData, botData] = await Promise.all([
+        getAllStaffAction(),
+        getBotsAction(),
+      ]);
+      setStaffList(staffData || []);
+      setBots(botData || []);
     } catch (e) {
       alert("Lỗi tải danh sách: " + e);
     } finally {
@@ -49,7 +69,7 @@ export function StaffManagerPanel() {
   };
 
   useEffect(() => {
-    fetchStaff();
+    fetchStaffAndBots();
   }, []);
 
   const resetForm = () => {
@@ -61,6 +81,7 @@ export function StaffManagerPanel() {
       phone: "",
     });
     setSelectedStaff(null);
+    setStaffPermissions({});
   };
 
   const handleOpenCreate = () => {
@@ -69,6 +90,7 @@ export function StaffManagerPanel() {
     setIsModalOpen(true);
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleOpenEdit = (staff: any) => {
     setSelectedStaff(staff);
     setFormData({
@@ -82,11 +104,34 @@ export function StaffManagerPanel() {
     setIsModalOpen(true);
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleOpenPassword = (staff: any) => {
     setSelectedStaff(staff);
     setFormData({ ...formData, password: "" });
     setModalMode("PASSWORD");
     setIsModalOpen(true);
+  };
+
+  // [NEW] Open Permissions Modal
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleOpenPermissions = async (staff: any) => {
+    setSelectedStaff(staff);
+    setModalMode("PERMISSIONS");
+    setIsModalOpen(true);
+    setStaffPermissions({});
+
+    // Fetch current permissions
+    const res = await getStaffBotPermissionsAction(staff.id);
+    if (res.success && res.data) {
+      const permMap: Record<string, string> = {};
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      res.data.forEach((p: any) => {
+        permMap[p.bot_id] = p.permission_type;
+      });
+      setStaffPermissions(permMap);
+    } else {
+      alert("Không tải được quyền hạn: " + res.error);
+    }
   };
 
   const handleSubmit = async () => {
@@ -114,28 +159,68 @@ export function StaffManagerPanel() {
         selectedStaff.id,
         formData.password,
       );
+    } else if (modalMode === "PERMISSIONS") {
+      // Permission logic handled separately per toggle, just close modal
+      setIsModalOpen(false);
+      return;
     }
 
     if (res?.success) {
       alert("Thành công!");
       setIsModalOpen(false);
-      fetchStaff();
-    } else {
+      fetchStaffAndBots();
+    } else if (res) {
       alert("Lỗi: " + res?.error);
+    }
+  };
+
+  const handleTogglePermission = async (
+    botId: string,
+    currentPerm: string | undefined,
+  ) => {
+    if (!selectedStaff) return;
+
+    // Logic toggle đơn giản: Chưa có -> Chat -> Revoke (Xóa) -> Chưa có
+    // (Có thể mở rộng UI để chọn cụ thể 'auth' hay 'view_only' sau)
+    // Hiện tại mặc định cấp quyền 'chat' (bao gồm cả view)
+
+    if (currentPerm) {
+      // Đang có quyền -> Thu hồi
+      const res = await revokeBotPermissionAction(selectedStaff.id, botId);
+      if (res.success) {
+        const newMap = { ...staffPermissions };
+        delete newMap[botId];
+        setStaffPermissions(newMap);
+      } else {
+        alert(res.error);
+      }
+    } else {
+      // Chưa có -> Cấp quyền 'chat'
+      const res = await assignBotPermissionAction(
+        selectedStaff.id,
+        botId,
+        "chat",
+      );
+      if (res.success) {
+        setStaffPermissions((prev) => ({ ...prev, [botId]: "chat" }));
+      } else {
+        alert(res.error);
+      }
     }
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm("Chắc chắn xóa nhân viên này?")) return;
     const res = await deleteStaffAction(id);
-    if (res.success) fetchStaff();
+    if (res.success) fetchStaffAndBots();
     else alert(res.error);
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleToggleActive = async (staff: any) => {
     const newState = !staff.is_active;
     await updateStaffAction(staff.id, { is_active: newState });
-    fetchStaff(); // Reload để cập nhật UI
+    fetchStaffAndBots();
   };
 
   return (
@@ -149,7 +234,7 @@ export function StaffManagerPanel() {
         </div>
         <div className="flex gap-3">
           <button
-            onClick={fetchStaff}
+            onClick={fetchStaffAndBots}
             className="p-2 bg-gray-800 rounded hover:bg-gray-700"
           >
             <IconRefresh
@@ -228,6 +313,17 @@ export function StaffManagerPanel() {
                 </td>
                 <td className="p-3 text-right">
                   <div className="flex justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {/* [NEW] Nút Phân quyền Bot (Chỉ hiện cho Staff thường, Admin mặc định full quyền) */}
+                    {staff.role !== "admin" && (
+                      <button
+                        onClick={() => handleOpenPermissions(staff)}
+                        className="p-2 hover:bg-gray-700 rounded text-green-400"
+                        title="Phân quyền Bot"
+                      >
+                        <IconRobot className="w-4 h-4" />
+                      </button>
+                    )}
+
                     <button
                       onClick={() => handleOpenPassword(staff)}
                       className="p-2 hover:bg-gray-700 rounded text-yellow-500"
@@ -260,14 +356,20 @@ export function StaffManagerPanel() {
       {/* Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-          <div className="bg-gray-800 w-full max-w-md rounded-xl border border-gray-700 shadow-2xl overflow-hidden animate-scale-up">
+          <div
+            className={`bg-gray-800 w-full rounded-xl border border-gray-700 shadow-2xl overflow-hidden animate-scale-up ${
+              modalMode === "PERMISSIONS" ? "max-w-2xl" : "max-w-md"
+            }`}
+          >
             <div className="p-4 bg-gray-900 border-b border-gray-700 flex justify-between items-center">
               <h3 className="font-bold text-white text-lg">
                 {modalMode === "CREATE"
                   ? "Thêm Nhân viên"
                   : modalMode === "EDIT"
                   ? "Sửa thông tin"
-                  : "Đổi mật khẩu"}
+                  : modalMode === "PASSWORD"
+                  ? "Đổi mật khẩu"
+                  : `Phân quyền Bot: ${selectedStaff?.username}`}
               </h3>
               <button
                 onClick={() => setIsModalOpen(false)}
@@ -278,85 +380,157 @@ export function StaffManagerPanel() {
             </div>
 
             <div className="p-6 space-y-4">
-              {modalMode !== "PASSWORD" && (
-                <>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 mb-1">
-                      Tên đăng nhập
-                    </label>
-                    <input
-                      disabled={modalMode === "EDIT"}
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white disabled:opacity-50"
-                      value={formData.username}
-                      onChange={(e) =>
-                        setFormData({ ...formData, username: e.target.value })
-                      }
-                    />
+              {modalMode === "PERMISSIONS" ? (
+                // --- PERMISSIONS UI ---
+                <div className="flex flex-col gap-4">
+                  <p className="text-sm text-gray-400">
+                    Chọn các Bot mà nhân viên này được phép truy cập:
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[400px] overflow-y-auto">
+                    {bots.map((bot) => {
+                      const perm = staffPermissions[bot.id];
+                      const isAssigned = !!perm;
+
+                      return (
+                        <div
+                          key={bot.id}
+                          className={`flex items-center justify-between p-3 rounded-lg border transition-all ${
+                            isAssigned
+                              ? "bg-blue-900/20 border-blue-500/50"
+                              : "bg-gray-900 border-gray-700 hover:border-gray-500"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <Avatar src={bot.avatar || ""} alt={bot.name} />
+                            <div className="overflow-hidden">
+                              <p className="text-sm font-bold text-white truncate max-w-[120px]">
+                                {bot.name}
+                              </p>
+                              <p className="text-xs text-gray-500 font-mono truncate">
+                                {bot.global_id}
+                              </p>
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => handleTogglePermission(bot.id, perm)}
+                            className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${
+                              isAssigned
+                                ? "bg-blue-600 justify-end"
+                                : "bg-gray-700 justify-start"
+                            }`}
+                          >
+                            <div className="w-4 h-4 bg-white rounded-full shadow-sm" />
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    {bots.length === 0 && (
+                      <p className="text-gray-500 italic text-center col-span-2">
+                        Chưa có Bot nào trong hệ thống.
+                      </p>
+                    )}
                   </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 mb-1">
-                      Họ và tên
-                    </label>
-                    <input
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
-                      value={formData.full_name}
-                      onChange={(e) =>
-                        setFormData({ ...formData, full_name: e.target.value })
-                      }
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 mb-1">
-                      Số điện thoại
-                    </label>
-                    <input
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
-                      value={formData.phone}
-                      onChange={(e) =>
-                        setFormData({ ...formData, phone: e.target.value })
-                      }
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 mb-1">
-                      Vai trò
-                    </label>
-                    <select
-                      className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
-                      value={formData.role}
-                      onChange={(e) =>
-                        setFormData({ ...formData, role: e.target.value })
-                      }
+                  <div className="flex justify-end pt-2">
+                    <button
+                      onClick={() => setIsModalOpen(false)}
+                      className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg font-medium"
                     >
-                      <option value="staff">Nhân viên (Staff)</option>
-                      <option value="admin">Quản trị viên (Admin)</option>
-                    </select>
+                      Đóng
+                    </button>
                   </div>
+                </div>
+              ) : (
+                // --- STANDARD CRUD UI ---
+                <>
+                  {modalMode !== "PASSWORD" && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-400 mb-1">
+                          Tên đăng nhập
+                        </label>
+                        <input
+                          disabled={modalMode === "EDIT"}
+                          className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white disabled:opacity-50"
+                          value={formData.username}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              username: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-400 mb-1">
+                          Họ và tên
+                        </label>
+                        <input
+                          className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
+                          value={formData.full_name}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              full_name: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-400 mb-1">
+                          Số điện thoại
+                        </label>
+                        <input
+                          className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
+                          value={formData.phone}
+                          onChange={(e) =>
+                            setFormData({ ...formData, phone: e.target.value })
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-400 mb-1">
+                          Vai trò
+                        </label>
+                        <select
+                          className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
+                          value={formData.role}
+                          onChange={(e) =>
+                            setFormData({ ...formData, role: e.target.value })
+                          }
+                        >
+                          <option value="staff">Nhân viên (Staff)</option>
+                          <option value="admin">Quản trị viên (Admin)</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
+
+                  {(modalMode === "CREATE" || modalMode === "PASSWORD") && (
+                    <div>
+                      <label className="block text-xs font-bold text-gray-400 mb-1">
+                        {modalMode === "PASSWORD" ? "Mật khẩu mới" : "Mật khẩu"}
+                      </label>
+                      <input
+                        type="password"
+                        className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
+                        value={formData.password}
+                        onChange={(e) =>
+                          setFormData({ ...formData, password: e.target.value })
+                        }
+                      />
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleSubmit}
+                    className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-lg mt-2 transition-colors"
+                  >
+                    Lưu Thay Đổi
+                  </button>
                 </>
               )}
-
-              {(modalMode === "CREATE" || modalMode === "PASSWORD") && (
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 mb-1">
-                    {modalMode === "PASSWORD" ? "Mật khẩu mới" : "Mật khẩu"}
-                  </label>
-                  <input
-                    type="password"
-                    className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white"
-                    value={formData.password}
-                    onChange={(e) =>
-                      setFormData({ ...formData, password: e.target.value })
-                    }
-                  />
-                </div>
-              )}
-
-              <button
-                onClick={handleSubmit}
-                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-lg mt-2 transition-colors"
-              >
-                Lưu Thay Đổi
-              </button>
             </div>
           </div>
         </div>

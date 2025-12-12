@@ -10,6 +10,7 @@ import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
 import { ThreadInfo, ThreadType } from "@/lib/types/zalo.types";
 import supabase from "@/lib/supabaseServer";
 import { SenderService } from "@/lib/core/services/sender-service";
+import { checkBotPermission } from "@/lib/actions/staff.actions";
 
 /**
  * Helper: Lấy API của Bot và xử lý lỗi chung
@@ -54,8 +55,8 @@ export async function getThreadsFromDBAction(
 
     // [UPDATE] Map thêm id (UUID) vào field 'uuid'
     const threads: ThreadInfo[] = conversations.map((conv) => ({
-      id: conv.global_id, // Hash ID (UI Key)
-      uuid: conv.id, // [NEW] UUID (Realtime Key)
+      id: conv.global_id,
+      uuid: conv.id,
       name: conv.name || `Hội thoại ${conv.global_id}`,
       avatar: conv.avatar || "",
       type: conv.type === "group" ? 1 : 0,
@@ -128,10 +129,16 @@ export async function sendMessageAction(
   staffId: string,
   botId: string,
   content: string,
-  threadId: string, // Đây là Global Hash ID từ UI
+  threadId: string,
   type: ThreadType,
 ) {
   try {
+    // [SECURITY CHECK] Kiểm tra quyền CHAT
+    const hasPermission = await checkBotPermission(staffId, botId, "chat");
+    if (!hasPermission) {
+      throw new Error("Bạn không có quyền gửi tin nhắn trên Bot này.");
+    }
+
     console.log(`[ChatAction] Request Send: ${content} -> ${threadId} (Hash)`);
 
     // Reverse Lookup

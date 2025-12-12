@@ -1,7 +1,8 @@
 /**
  * lib/actions/bot.actions.ts
- * [SERVER ACTIONS - V3.1]
- * Update: Hỗ trợ cấu hình Auto-Sync Interval.
+ * [SECURITY UPDATE]
+ * - getBotsAction: Lọc bot theo quyền hạn của nhân viên (Admin thấy hết, Staff chỉ thấy bot được gán).
+ * - Các action ghi (Create/Delete/Update): Chỉ Admin mới được thực hiện.
  */
 
 "use server";
@@ -11,18 +12,63 @@ import { SyncService } from "@/lib/core/services/sync-service";
 import supabase from "@/lib/supabaseServer";
 import { revalidatePath } from "next/cache";
 import { ZaloBot } from "@/lib/types/database.types";
+import { getStaffSession } from "@/lib/actions/staff.actions";
+
+// --- Helpers ---
+async function requireAdmin() {
+  const session = await getStaffSession();
+  if (!session || session.role !== "admin") {
+    throw new Error("Unauthorized: Hành động này yêu cầu quyền Quản trị viên.");
+  }
+  return session;
+}
+
+// --- Actions ---
 
 export async function getBotsAction() {
-  const { data, error } = await supabase
+  const session = await getStaffSession();
+  if (!session) throw new Error("Unauthorized");
+
+  // 1. Nếu là Admin: Lấy toàn bộ
+  if (session.role === "admin") {
+    const { data, error } = await supabase
+      .from("zalo_bots")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) throw new Error(error.message);
+    return data as ZaloBot[];
+  }
+
+  // 2. Nếu là Staff: Lấy danh sách Bot được phân quyền
+  // Query bảng permissions để lấy bot_id
+  const { data: permissions, error: permError } = await supabase
+    .from("staff_bot_permissions")
+    .select("bot_id")
+    .eq("staff_id", session.id);
+
+  if (permError) throw new Error(permError.message);
+
+  if (!permissions || permissions.length === 0) {
+    return []; // Không có quyền trên bot nào
+  }
+
+  const botIds = permissions.map((p) => p.bot_id);
+
+  // Query thông tin bot dựa trên list ID
+  const { data: bots, error: botError } = await supabase
     .from("zalo_bots")
     .select("*")
+    .in("id", botIds)
     .order("created_at", { ascending: false });
 
-  if (error) throw new Error(error.message);
-  return data as ZaloBot[];
+  if (botError) throw new Error(botError.message);
+  return bots as ZaloBot[];
 }
 
 export async function createBotAction(name: string) {
+  await requireAdmin(); // Chỉ Admin
+
   const { data, error } = await supabase
     .from("zalo_bots")
     .insert({
@@ -30,7 +76,7 @@ export async function createBotAction(name: string) {
       global_id: `temp_${Date.now()}`,
       status: { state: "STOPPED" },
       is_active: true,
-      auto_sync_interval: 0, // Mặc định tắt auto-sync
+      auto_sync_interval: 0,
     })
     .select()
     .single();
@@ -41,6 +87,8 @@ export async function createBotAction(name: string) {
 }
 
 export async function deleteBotAction(botId: string) {
+  await requireAdmin(); // Chỉ Admin
+
   const { error } = await supabase.from("zalo_bots").delete().eq("id", botId);
   if (error) throw new Error(error.message);
   const manager = BotRuntimeManager.getInstance();
@@ -49,12 +97,16 @@ export async function deleteBotAction(botId: string) {
 }
 
 export async function startBotLoginAction(botId: string) {
+  // Staff được phép login bot mà họ có quyền "auth" hoặc "chat" (tùy policy, ở đây tạm mở cho người thấy bot)
+  // Thực tế nên check thêm quyền 'auth' ở đây nếu muốn chặt chẽ hơn.
   const manager = BotRuntimeManager.getInstance();
   manager.startLoginQR(botId);
   return { success: true };
 }
 
 export async function addBotWithTokenAction(tokenJson: string) {
+  await requireAdmin(); // Chỉ Admin
+
   let credentials;
   try {
     credentials = JSON.parse(tokenJson);
@@ -66,7 +118,7 @@ export async function addBotWithTokenAction(tokenJson: string) {
   }
 
   try {
-    const bot = await createPlaceholderBotAction();
+    const bot = await createPlaceholderBotAction(); // Hàm này đã check admin bên trong
     const manager = BotRuntimeManager.getInstance();
     await manager.loginWithCredentials(bot.id, credentials);
 
@@ -79,9 +131,10 @@ export async function addBotWithTokenAction(tokenJson: string) {
 }
 
 export async function retryBotLoginAction(botId: string) {
+  // Tương tự startBotLoginAction
   const { data: bot } = await supabase
     .from("zalo_bots")
-    .select("access_token, auto_sync_interval") // Lấy thêm setting sync
+    .select("access_token, auto_sync_interval")
     .eq("id", botId)
     .single();
 
@@ -91,7 +144,6 @@ export async function retryBotLoginAction(botId: string) {
 
   try {
     const manager = BotRuntimeManager.getInstance();
-    // Truyền setting sync vào hàm login
     await manager.loginWithCredentials(
       botId,
       bot.access_token,
@@ -104,21 +156,15 @@ export async function retryBotLoginAction(botId: string) {
   }
 }
 
-/**
- * [NEW] Action kích hoạt đồng bộ dữ liệu thủ công
- */
 export async function syncBotDataAction(botId: string) {
+  // Staff thấy bot là được sync
   try {
-    // Kiểm tra xem bot có đang online không trước khi sync
     const manager = BotRuntimeManager.getInstance();
-    // (Sẽ throw error nếu bot chưa init hoặc chưa login)
     manager.getBotAPI(botId);
 
-    // Chạy sync nền
     SyncService.syncAll(botId).then(async (res) => {
       console.log(`[Action] Manual Sync result for ${botId}:`, res);
       if (res.success) {
-        // Update heartbeat thủ công
         await supabase
           .from("zalo_bots")
           .update({ last_activity_at: new Date().toISOString() })
@@ -135,24 +181,18 @@ export async function syncBotDataAction(botId: string) {
   }
 }
 
-/**
- * [NEW] Cập nhật cấu hình Auto-Sync
- */
 export async function updateBotSyncSettingsAction(
   botId: string,
   intervalMinutes: number,
 ) {
+  await requireAdmin(); // Chỉ Admin
+
   try {
-    // 1. Update DB
     await supabase
       .from("zalo_bots")
       .update({ auto_sync_interval: intervalMinutes })
       .eq("id", botId);
 
-    // 2. Nếu bot đang online, cần restart lại polling timer (bằng cách login lại nhẹ hoặc update runtime trực tiếp)
-    // Cách đơn giản nhất: Gọi retryLogin để reload config runtime
-    // Hoặc ta có thể thêm hàm updateConfig vào RuntimeManager (tốt hơn).
-    // Ở đây dùng retryLogin cho chắc chắn.
     await retryBotLoginAction(botId);
 
     revalidatePath("/dashboard");
@@ -162,8 +202,9 @@ export async function updateBotSyncSettingsAction(
   }
 }
 
-// ... (Giữ nguyên createPlaceholderBotAction)
 export async function createPlaceholderBotAction() {
+  await requireAdmin(); // Chỉ Admin
+
   const tempName = `New Bot ${new Date().toLocaleTimeString()}`;
   const { data, error } = await supabase
     .from("zalo_bots")
