@@ -1,15 +1,15 @@
 /**
  * lib/core/bot-runtime-manager.ts
- * [CORE ENGINE - V3.1]
- * Update:
- * 1. Auto-Polling Mechanism (Tự động Sync theo chu kỳ).
- * 2. Update Heartbeat (last_activity_at) khi Sync.
+ * [CORE ENGINE - V4.4 FULL RAW LOGGING]
+ * - Lưu trữ toàn bộ object lỗi (không cắt string).
+ * - Lưu trữ raw response khi ping thành công.
+ * - Capture stack trace đầy đủ.
  */
 
 import { Zalo, API } from "zca-js";
 import supabase from "@/lib/supabaseServer";
 import { MessagePipeline } from "./pipelines/message-pipeline";
-import { ZaloBotStatus } from "@/lib/types/database.types";
+import { ZaloBotStatus, HealthCheckLog } from "@/lib/types/database.types";
 import { SyncService } from "@/lib/core/services/sync-service";
 
 interface ZaloCredentials {
@@ -22,18 +22,25 @@ type BotRuntime = {
   instance: Zalo;
   api: API | null;
   status: ZaloBotStatus["state"];
-  pollingInterval?: NodeJS.Timeout; // [NEW] Timer cho polling
+  pollingInterval?: NodeJS.Timeout;
+  lastPing?: number;
 };
+
+const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
+const INACTIVE_THRESHOLD = 10 * 60 * 1000;
 
 export class BotRuntimeManager {
   private static instance: BotRuntimeManager;
   private bots: Map<string, BotRuntime> = new Map();
   private messagePipeline: MessagePipeline;
+  private healthCheckTimer: NodeJS.Timeout | null = null;
 
   private constructor() {
-    console.log("[BotManager] Khởi tạo Multi-Tenant Engine V3.1...");
+    console.log(
+      "[BotManager] 🚀 Khởi tạo Engine V4.5 (Centralized Error Reporting)...",
+    );
     this.messagePipeline = new MessagePipeline();
-    setTimeout(() => this.restoreBotsFromDB(), 2000);
+    this.initSystem();
   }
 
   public static getInstance(): BotRuntimeManager {
@@ -45,55 +52,221 @@ export class BotRuntimeManager {
     return customGlobal.botRuntimeManager;
   }
 
-  // --- RESTORE & INIT ---
-
-  public async restoreBotsFromDB() {
-    console.log("[BotManager] 🔄 Đang khôi phục các Bot từ DB...");
+  private async initSystem() {
     try {
-      const { data: bots, error } = await supabase
-        .from("zalo_bots")
-        .select("*")
-        .eq("is_active", true);
-
-      if (error) {
-        console.error("[BotManager] ❌ Lỗi tải bots:", error.message);
-        return;
-      }
-
-      if (bots && bots.length > 0) {
-        for (const b of bots) {
-          const credentials = b.access_token as ZaloCredentials | null;
-          if (credentials && credentials.cookie && credentials.imei) {
-            // Pass thêm config polling từ DB vào hàm login
-            this.loginWithCredentials(
-              b.id,
-              credentials,
-              b.auto_sync_interval,
-            ).catch((e) => {
-              console.error(`[BotManager] Khôi phục lỗi (${b.id}):`, e);
-            });
-          }
-        }
-      }
+      await this.resetAllBotStatusOnStartup();
+      await this.restoreBotsFromDB();
+      this.startHealthCheckLoop();
     } catch (e) {
-      console.error("[BotManager] Exception Restore:", e);
+      console.error("[BotManager] ❌ Init System Failed:", e);
     }
   }
 
+  // --- RESET & RESTORE ---
+
+  private async resetAllBotStatusOnStartup() {
+    console.log("[BotManager] 🧹 Resetting Zombie Bots...");
+    await supabase
+      .from("zalo_bots")
+      .update({
+        status: {
+          state: "STOPPED",
+          error_message: "System Restarted",
+          last_update: new Date().toISOString(),
+        },
+      })
+      .neq("status->>state", "ERROR")
+      .neq("status->>state", "STOPPED");
+  }
+
+  public async restoreBotsFromDB() {
+    console.log("[BotManager] 🔄 Restoring Active Bots...");
+    const { data: bots } = await supabase
+      .from("zalo_bots")
+      .select("*")
+      .eq("is_active", true);
+
+    if (bots && bots.length > 0) {
+      console.log(`[BotManager] Found ${bots.length} active bots.`);
+      bots.forEach((b) => {
+        const creds = b.access_token as ZaloCredentials | null;
+        if (creds && creds.cookie) {
+          this.loginWithCredentials(b.id, creds, b.auto_sync_interval).catch(
+            (e) => {
+              // Log raw lỗi khôi phục
+              console.warn(`[Restore] Failed ${b.name}:`, e);
+            },
+          );
+        }
+      });
+    }
+  }
+
+  // [NEW] PUBLIC METHOD CHO MODULE KHÁC GỌI
+  public async reportError(botId: string, error: unknown) {
+    await this.handleBotDeath(botId, error);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private serializeError(error: any): any {
+    if (typeof error === "object" && error !== null) {
+      return {
+        message: error.message,
+        name: error.name,
+        stack: error.stack,
+        code: error.code,
+        data: error.data,
+        ...error,
+      };
+    }
+    return { message: String(error) };
+  }
+
+  // --- HEALTH CHECK DOCTOR ---
+
+  private startHealthCheckLoop() {
+    if (this.healthCheckTimer) clearInterval(this.healthCheckTimer);
+
+    this.healthCheckTimer = setInterval(async () => {
+      console.log("[HealthCheck] 🩺 Scanning bots...");
+      const now = Date.now();
+
+      for (const [botId, runtime] of this.bots.entries()) {
+        if (runtime.status !== "LOGGED_IN" || !runtime.api) continue;
+
+        const lastActive = runtime.lastPing || 0;
+        const diff = now - lastActive;
+
+        if (diff > INACTIVE_THRESHOLD) {
+          const start = Date.now();
+          let log: HealthCheckLog;
+
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const response = await runtime.api.fetchAccountInfo();
+            const latency = Date.now() - start;
+
+            log = {
+              timestamp: new Date().toISOString(),
+              action: "PING",
+              status: "OK",
+              message: "Ping success (Keep-alive)",
+              latency: latency,
+              // Lưu raw response để debug nếu cần xem Zalo trả về gì
+              raw_data: response,
+            };
+
+            this.updateHeartbeat(botId);
+            console.log(`[HealthCheck] ${botId} OK (${latency}ms)`);
+          } catch (error) {
+            const rawErr = this.serializeError(error);
+            const errStr = rawErr.message || String(error);
+
+            log = {
+              timestamp: new Date().toISOString(),
+              action: "PING",
+              status: "FAIL",
+              message: errStr,
+              raw_data: rawErr,
+              error_stack: rawErr.stack,
+            };
+            console.error(`[HealthCheck] ${botId} FAILED.`);
+            await this.handleBotDeath(botId, error);
+          }
+
+          await this.saveHealthCheckLog(botId, log);
+        }
+      }
+    }, HEALTH_CHECK_INTERVAL);
+  }
+
+  private async saveHealthCheckLog(botId: string, log: HealthCheckLog) {
+    try {
+      await supabase
+        .from("zalo_bots")
+        .update({ health_check_log: log })
+        .eq("id", botId);
+    } catch (e) {
+      console.error("[BotManager] Save log failed:", e);
+    }
+  }
+
+  // --- STRICT ERROR HANDLING (FULL LOG) ---
+  private async handleBotDeath(botId: string, error: unknown) {
+    const rawErr = this.serializeError(error);
+    const errStr = rawErr.message || String(error);
+
+    // Kiểm tra nếu bot đã chết rồi thì không spam update DB nữa
+    const runtime = this.bots.get(botId);
+    if (runtime && runtime.status === "ERROR") {
+      return;
+    }
+
+    console.error(`[BotManager] 💀 Bot Died ${botId}. Cause:`, errStr);
+
+    // 1. Dừng Runtime
+    await this.stopBot(botId);
+
+    // 2. Cập nhật DB: ERROR & IS_ACTIVE = FALSE
+    // Lưu full error message vào cột status
+    await supabase
+      .from("zalo_bots")
+      .update({
+        is_active: false,
+        status: {
+          state: "ERROR",
+          error_message: errStr,
+          last_update: new Date().toISOString(),
+          // Lưu thêm context vào status nếu cần thiết debug nhanh
+          debug_code: rawErr.code,
+        },
+        // Đồng thời cập nhật luôn health_check_log với context "ERROR_HANDLER"
+        health_check_log: {
+          timestamp: new Date().toISOString(),
+          action: "ERROR_HANDLER",
+          status: "FAIL",
+          message: errStr,
+          raw_data: rawErr,
+          error_stack: rawErr.stack,
+        },
+      })
+      .eq("id", botId);
+  }
+
+  // --- CORE ACTIONS ---
+
   public getOrInitBot(botId: string): BotRuntime {
     if (this.bots.has(botId)) return this.bots.get(botId)!;
-
-    const instance = new Zalo({
-      selfListen: true,
-      logging: true,
-    });
-
-    const runtime = { instance, api: null, status: "STOPPED" as const };
+    const instance = new Zalo({ selfListen: true, logging: false });
+    const runtime: BotRuntime = {
+      instance,
+      api: null,
+      status: "STOPPED",
+      lastPing: Date.now(),
+    };
     this.bots.set(botId, runtime);
     return runtime;
   }
 
-  // --- LOGIN ACTIONS ---
+  public async loginWithCredentials(
+    botId: string,
+    credentials: unknown,
+    autoSyncInterval: number = 0,
+  ) {
+    const runtime = this.getOrInitBot(botId);
+    await this.updateBotStatusInDB(botId, "STARTING");
+    runtime.status = "STARTING";
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const api = await runtime.instance.login(credentials as any);
+      await this.handleLoginSuccess(botId, api, autoSyncInterval);
+      return { success: true };
+    } catch (error: unknown) {
+      console.error(`[BotManager] Login Failed (${botId})`);
+      await this.handleBotDeath(botId, error);
+      throw error;
+    }
+  }
 
   public async startLoginQR(botId: string) {
     const runtime = this.getOrInitBot(botId);
@@ -115,45 +288,31 @@ export class BotRuntimeManager {
         }
         await this.updateBotStatusInDB(botId, "QR_WAITING", undefined, base64);
       });
-
-      console.log(`[BotManager] ✅ QR Login Success: ${botId}`);
       await this.handleLoginSuccess(botId, api);
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[BotManager] QR Error:`, errMsg);
       runtime.status = "ERROR";
       await this.updateBotStatusInDB(botId, "ERROR", errMsg);
     }
   }
 
-  public async loginWithCredentials(
-    botId: string,
-    credentials: unknown,
-    autoSyncInterval: number = 0, // [NEW] Tham số polling
-  ) {
-    const runtime = this.getOrInitBot(botId);
-    console.log(
-      `[BotManager] 🔐 Login credential: ${botId} (Polling: ${autoSyncInterval}m)`,
-    );
-
-    await this.updateBotStatusInDB(botId, "STARTING");
-    runtime.status = "STARTING";
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const api = await runtime.instance.login(credentials as any);
-      await this.handleLoginSuccess(botId, api, autoSyncInterval);
-      return { success: true };
-    } catch (error: unknown) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[BotManager] Login Error:`, errMsg);
-      runtime.status = "ERROR";
-      await this.updateBotStatusInDB(botId, "ERROR", errMsg);
-      throw error;
+  public async stopBot(botId: string) {
+    const runtime = this.bots.get(botId);
+    if (runtime) {
+      if (runtime.pollingInterval) clearInterval(runtime.pollingInterval);
+      if (runtime.api) {
+        try {
+          runtime.api.listener.stop();
+        } catch {}
+      }
+      runtime.api = null;
+      runtime.status = "STOPPED";
+      await this.updateBotStatusInDB(botId, "STOPPED");
+      this.bots.delete(botId);
     }
   }
 
-  // --- CORE HANDLER ---
+  // --- HANDLERS ---
 
   private async handleLoginSuccess(
     botId: string,
@@ -163,55 +322,72 @@ export class BotRuntimeManager {
     const runtime = this.bots.get(botId);
     if (!runtime) return;
 
-    // Clear old Polling & Listener
     if (runtime.pollingInterval) clearInterval(runtime.pollingInterval);
-    if (runtime.api) {
-      try {
-        runtime.api.listener.stop();
-      } catch {}
-    }
 
     runtime.api = api;
     runtime.status = "LOGGED_IN";
+    runtime.lastPing = Date.now();
 
-    // 1. Update Info & Heartbeat
     await this.updateBotInfoAndHeartbeat(botId, api);
-
-    // 2. Setup Listener
     this.setupMessageListener(botId, api);
 
-    // 3. Trigger Initial Sync (Ngay lập tức)
+    // Log sự kiện login thành công
+    await this.saveHealthCheckLog(botId, {
+      timestamp: new Date().toISOString(),
+      action: "LOGIN",
+      status: "OK",
+      message: "Login successful via Credentials/QR",
+      latency: 0,
+    });
+
     this.triggerSync(botId, "LOGIN_INIT");
 
-    // 4. Setup Polling (Nếu có cấu hình)
     if (autoSyncInterval > 0) {
-      console.log(
-        `[BotManager] ⏰ Setup Polling for ${botId}: Every ${autoSyncInterval} mins`,
-      );
       runtime.pollingInterval = setInterval(() => {
         this.triggerSync(botId, "AUTO_POLLING");
       }, autoSyncInterval * 60 * 1000);
     }
   }
 
-  // Hàm Sync Wrapper để cập nhật Heartbeat
+  private setupMessageListener(botId: string, api: API) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    api.listener.on("message", async (message: any) => {
+      this.updateHeartbeat(botId);
+      await this.messagePipeline.process(botId, message);
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    api.listener.on("error", async (err: any) => {
+      console.error(`[BotManager] ⚡ Socket Error (${botId}):`, err);
+      // Ghi log raw lỗi socket
+      await this.handleBotDeath(botId, err);
+    });
+    api.listener.start();
+  }
+
   private async triggerSync(botId: string, source: string) {
-    console.log(`[BotManager] 🔄 Trigger Sync (${source}) for ${botId}...`);
     try {
       const res = await SyncService.syncAll(botId);
       if (res.success) {
-        // Cập nhật last_activity_at để chứng minh bot còn sống
-        await supabase
-          .from("zalo_bots")
-          .update({ last_activity_at: new Date().toISOString() })
-          .eq("id", botId);
-        console.log(
-          `[BotManager] ✅ Sync Success (${source}) & Heartbeat Updated.`,
-        );
+        this.updateHeartbeat(botId);
+        // Log sync success (optional)
+      } else {
+        // Sync lỗi -> Kill và ghi log raw
+        await this.handleBotDeath(botId, res.error);
       }
     } catch (e) {
-      console.error(`[BotManager] ⚠️ Sync Failed (${source}):`, e);
+      await this.handleBotDeath(botId, e);
     }
+  }
+
+  private updateHeartbeat(botId: string) {
+    const runtime = this.bots.get(botId);
+    if (runtime) runtime.lastPing = Date.now();
+
+    supabase
+      .from("zalo_bots")
+      .update({ last_activity_at: new Date().toISOString() })
+      .eq("id", botId)
+      .then();
   }
 
   private async updateBotInfoAndHeartbeat(botId: string, api: API) {
@@ -251,29 +427,14 @@ export class BotRuntimeManager {
             error_message: null,
             qr_code: null,
           },
-          last_activity_at: new Date().toISOString(), // Heartbeat ban đầu
+          last_activity_at: new Date().toISOString(),
         })
         .eq("id", botId);
     } catch (e) {
-      console.error("[BotManager] DB Update Info Error:", e);
+      console.error("[BotManager] Update Info Error:", e);
+      // Lỗi update info cũng log raw
+      await this.handleBotDeath(botId, e);
     }
-  }
-
-  private setupMessageListener(botId: string, api: API) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    api.listener.on("message", async (message: any) => {
-      // Khi nhận tin nhắn cũng là một dấu hiệu Bot còn sống -> Update Heartbeat (Debounced nếu cần)
-      // Ở đây ta tạm update nhẹ trong DB (hoặc có thể bỏ qua để tối ưu performace, chỉ update khi Sync)
-      await this.messagePipeline.process(botId, message);
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    api.listener.on("error", (err: any) => {
-      console.error(`[BotManager] ❌ LISTENER ERROR (${botId}):`, err);
-      // Nếu lỗi auth, tự động update DB thành ERROR
-      // Logic: Update DB status -> ERROR
-    });
-
-    api.listener.start();
   }
 
   private async updateBotStatusInDB(
@@ -300,19 +461,5 @@ export class BotRuntimeManager {
     if (!runtime || !runtime.api)
       throw new Error(`Bot ${botId} chưa sẵn sàng.`);
     return runtime.api;
-  }
-
-  public async stopBot(botId: string) {
-    const runtime = this.bots.get(botId);
-    if (runtime) {
-      if (runtime.pollingInterval) clearInterval(runtime.pollingInterval);
-      if (runtime.api)
-        try {
-          runtime.api.listener.stop();
-        } catch {}
-      runtime.api = null;
-      runtime.status = "STOPPED";
-      await this.updateBotStatusInDB(botId, "STOPPED");
-    }
   }
 }

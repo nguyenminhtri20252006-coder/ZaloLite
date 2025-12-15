@@ -23,6 +23,39 @@ async function requireAdmin() {
   return session;
 }
 
+/**
+ * [NEW] Cập nhật Token cho Bot đang tồn tại (Dùng để Re-login)
+ */
+export async function updateBotTokenAction(botId: string, tokenJson: string) {
+  await requireAdmin();
+
+  let credentials;
+  try {
+    credentials = JSON.parse(tokenJson);
+    if (!credentials.cookie || !credentials.imei) {
+      throw new Error("JSON thiếu trường 'cookie' hoặc 'imei'.");
+    }
+  } catch (e) {
+    return { success: false, error: "Format JSON không hợp lệ." };
+  }
+
+  try {
+    const manager = BotRuntimeManager.getInstance();
+
+    // Thử login với credentials mới
+    await manager.loginWithCredentials(botId, credentials);
+
+    // Nếu login thành công, credential mới sẽ được tự động lưu vào DB
+    // thông qua hàm updateBotInfoAndHeartbeat trong Runtime.
+
+    revalidatePath("/dashboard");
+    return { success: true };
+  } catch (error: unknown) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errMsg };
+  }
+}
+
 // --- Actions ---
 
 export async function getBotsAction() {

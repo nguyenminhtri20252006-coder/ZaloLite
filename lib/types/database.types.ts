@@ -1,31 +1,76 @@
 /**
  * lib/types/database.types.ts
- * [UPDATED] Schema cho ZaloLite CRM v2.0 (Consolidated Architecture)
- * Khớp 1:1 với file db_ZaloLite_v2.sql
- * NOTE: Sử dụng 'unknown' thay vì 'any' cho dữ liệu JSONB chưa xác định cấu trúc.
+ * [UPDATED] Schema cho ZaloLite CRM (Self-Healing Ready).
+ * Khớp với DB Schema SQL.
  */
 
-// --- ENUMS & CONSTANTS ---
 export type StaffRole = "admin" | "staff";
 export type BotPermissionType = "chat" | "auth" | "view_only";
 export type SenderType = "customer" | "staff_on_bot";
 export type ConversationType = "user" | "group";
 
-// --- 7. WORK SESSIONS (TRACKING) ---
+// --- STATUS TYPES ---
+export interface ZaloBotStatus {
+  state: "STOPPED" | "STARTING" | "QR_WAITING" | "LOGGED_IN" | "ERROR";
+  last_login?: string;
+  error_message?: string;
+  qr_code?: string;
+  last_update?: string;
+}
+
+// [UPDATED] Cấu trúc Log Health Check (Full Raw)
+export interface HealthCheckLog {
+  timestamp: string;
+  action: "PING" | "LOGIN" | "SYNC" | "ERROR_HANDLER"; // Phân loại hành động
+  status: "OK" | "FAIL";
+  message: string;
+  latency?: number;
+
+  // [NEW] Chứa toàn bộ dữ liệu thô (Object Error đầy đủ hoặc Response API đầy đủ)
+  raw_data?: unknown;
+
+  // [NEW] Stack trace nếu là lỗi (để debug sâu)
+  error_stack?: string;
+}
+
+// --- TABLES ---
+
+export interface ZaloBot {
+  id: string; // UUID
+  global_id: string | null;
+  name: string;
+  avatar: string | null;
+  phone: string | null;
+
+  raw_data: unknown;
+  access_token: unknown; // JSONB
+  status: ZaloBotStatus; // JSONB
+
+  is_active: boolean;
+  last_activity_at: string | null;
+  auto_sync_interval: number;
+
+  // [NEW FIELD]
+  health_check_log?: HealthCheckLog;
+
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkSession {
-  id: number; // BIGINT
+  id: number;
   staff_id: string;
   started_at: string;
   last_ping_at: string;
   ended_at: string | null;
   ip_address?: string | null;
   user_agent?: string | null;
+  session_token_hash?: string;
   created_at: string;
 }
 
-// ... (Giữ nguyên các type khác)
 export interface StaffAccount {
-  id: string; // UUID
+  id: string;
   username: string;
   password_hash: string;
   full_name: string;
@@ -44,117 +89,67 @@ export interface StaffBotPermission {
   assigned_at: string;
 }
 
-// --- 2. ZALO BOTS (TENANTS) ---
-export interface ZaloBotStatus {
-  state: "STOPPED" | "STARTING" | "QR_WAITING" | "LOGGED_IN" | "ERROR";
-  last_login?: string;
-  error_message?: string;
-  qr_code?: string;
-  last_update?: string;
-}
-
-export interface ZaloBot {
-  id: string; // UUID
-  global_id: string | null; // Zalo User ID (Unique)
-  name: string;
-  avatar: string | null;
-  phone: string | null;
-
-  raw_data: unknown;
-  access_token: unknown;
-  status: ZaloBotStatus;
-
-  // [NEW FIELDS]
-  last_activity_at: string | null; // Thời gian tương tác/sync cuối cùng
-  auto_sync_interval: number; // Chu kỳ sync tự động (phút), 0 = tắt
-
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-// --- 3. CUSTOMERS (SINGLE VIEW) ---
 export interface Customer {
-  id: string; // UUID
-  global_id: string; // Zalo UID (Global Unique)
-
-  // Normalized Info (Cho UI)
+  id: string;
+  global_id: string;
   display_name: string | null;
   avatar: string | null;
   phone: string | null;
   real_name: string | null;
-
-  // Raw & CRM Data
   raw_data: unknown;
   tags: string[] | null;
   notes: string | null;
-
   created_at: string;
   updated_at: string;
 }
 
-// Mapping Table: Bot <-> Customer
 export interface ZaloCustomerMapping {
   id: string;
   customer_id: string;
   bot_id: string;
-  external_user_id: string; // ID mà Bot nhìn thấy (có thể khác Global ID trong ngữ cảnh OA)
+  external_user_id: string;
   bot_alias: string | null;
-  status: unknown; // { is_friend: boolean, is_blocked: boolean ... }
+  status: unknown;
   last_interaction_at: string;
   created_at: string;
 }
 
-// --- 4. CONVERSATIONS (UNIFIED) ---
 export interface Conversation {
-  id: string; // UUID
-  global_id: string; // Thread ID (Group ID hoặc User ID)
+  id: string;
+  global_id: string;
   type: ConversationType;
-
-  // Normalized Info
   name: string | null;
   avatar: string | null;
-
-  raw_data: unknown; // Metadata gốc của nhóm
-
+  raw_data: unknown;
   last_activity_at: string;
   created_at: string;
   updated_at: string;
 }
 
-// Mapping Table: Bot <-> Conversation
 export interface ZaloConversationMapping {
   id: string;
   conversation_id: string;
   bot_id: string;
-  external_thread_id: string; // Thread ID theo ngữ cảnh Bot
-  status: unknown; // { is_admin: boolean, status: 'active'|'left' ... }
+  external_thread_id: string;
+  status: unknown;
   created_at: string;
 }
 
-// --- 5. MESSAGES (DEDUPLICATED) ---
 export interface Message {
-  id: number; // BIGINT
+  id: number;
   conversation_id: string;
-
-  // [CRITICAL] Mảng các Bot đã thấy tin nhắn này
-  bot_ids: string[]; // UUID[]
-
-  zalo_msg_id: string; // Logic Key
-
-  sender_id: string; // Global ID của người gửi
+  bot_ids: string[];
+  zalo_msg_id: string;
+  sender_id: string;
   sender_type: SenderType;
-  staff_id?: string | null; // Nếu staff gửi
-
-  content: unknown; // Normalized JSON for UI
-  raw_content: unknown; // Original Zalo Payload
+  staff_id?: string | null;
+  content: unknown;
+  raw_content: unknown;
   msg_type: string | null;
-
   sent_at: string;
   created_at: string;
 }
 
-// --- 6. LOGS ---
 export interface AuditLog {
   id: number;
   staff_id: string | null;

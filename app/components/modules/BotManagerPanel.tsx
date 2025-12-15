@@ -1,8 +1,6 @@
 /**
  * app/components/modules/BotManagerPanel.tsx
- * [FIXED]
- * - Fix lỗi "Property does not exist" (thêm prop onStartLogin).
- * - Fix lỗi "no-explicit-any" (xử lý error chuẩn).
+ * [UPDATED V5.0] Tích hợp Realtime Database.
  */
 
 "use client";
@@ -16,6 +14,7 @@ import {
   IconClose,
   IconCheck,
   IconClock,
+  IconInfo, // Đảm bảo import đủ
 } from "@/app/components/ui/Icons";
 import { Avatar } from "@/app/components/ui/Avatar";
 import {
@@ -23,10 +22,13 @@ import {
   updateBotSyncSettingsAction,
   retryBotLoginAction,
   addBotWithTokenAction,
+  updateBotTokenAction,
   createPlaceholderBotAction,
 } from "@/lib/actions/bot.actions";
+// [NEW] Import Hook
+import { useZaloBotsRealtime } from "@/lib/hooks/useZaloBotsRealtime";
 
-// --- Helpers ---
+// ... existing helpers ...
 const timeAgo = (dateStr: string | null) => {
   if (!dateStr) return "Chưa hoạt động";
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -38,23 +40,60 @@ const timeAgo = (dateStr: string | null) => {
   return `${Math.floor(hours / 24)} ngày trước`;
 };
 
-const getHealthStatus = (dateStr: string | null) => {
-  if (!dateStr) return "dead";
-  const diff = Date.now() - new Date(dateStr).getTime();
-  if (diff < 60 * 60 * 1000) return "healthy"; // < 1 giờ
-  if (diff < 24 * 60 * 60 * 1000) return "warning"; // < 24 giờ
-  return "dead"; // > 24 giờ
+const HealthLog = ({ log }: { log?: ZaloBot["health_check_log"] }) => {
+  if (!log)
+    return (
+      <div className="mt-3 p-2 bg-black/20 rounded text-xs text-gray-500 italic">
+        Chưa có dữ liệu kiểm tra sức khỏe.
+      </div>
+    );
+
+  const isOk = log.status === "OK";
+  const date = new Date(log.timestamp).toLocaleTimeString();
+
+  return (
+    <div
+      className={`mt-3 p-3 rounded-lg border text-xs ${
+        isOk
+          ? "bg-green-900/10 border-green-800/30 text-green-300"
+          : "bg-red-900/10 border-red-800/30 text-red-300"
+      }`}
+    >
+      <div className="flex justify-between items-center mb-1">
+        <span className="font-bold flex items-center gap-1">
+          {isOk ? (
+            <IconCheck className="w-3 h-3" />
+          ) : (
+            <IconClose className="w-3 h-3" />
+          )}
+          {isOk ? "Bot Health: Tốt" : "Bot Health: Có vấn đề"}
+        </span>
+        <span className="opacity-70">{date}</span>
+      </div>
+      <p className="truncate opacity-90">{log.message}</p>
+      {log.latency && (
+        <p className="mt-1 opacity-60 font-mono">Độ trễ: {log.latency}ms</p>
+      )}
+
+      {/* [NEW] Hiển thị nút xem raw data nếu cần debug sâu (Optional) */}
+      <div className="mt-2 pt-2 border-t border-white/10 flex justify-end">
+        <span className="text-[10px] uppercase opacity-50 font-mono">
+          Action: {log.action || "UNKNOWN"}
+        </span>
+      </div>
+    </div>
+  );
 };
 
 export function BotManagerPanel({
-  bots,
+  bots: initialBots, // Rename prop để tránh conflict
   isLoading,
   onRefresh,
   onDeleteBot,
   onStartLogin,
   activeQrBotId,
   qrCodeData,
-  userRole, // [NEW PROP]
+  userRole,
 }: {
   bots: ZaloBot[];
   isLoading: boolean;
@@ -63,10 +102,17 @@ export function BotManagerPanel({
   onStartLogin: (id: string) => Promise<void>;
   activeQrBotId: string | null;
   qrCodeData: string | null;
-  userRole: string; // "admin" | "staff"
+  userRole: string;
 }) {
+  // [NEW] Sử dụng Hook Realtime
+  // bots state bây giờ sẽ tự động cập nhật khi DB thay đổi
+  const bots = useZaloBotsRealtime(initialBots);
+
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
+
+  // Modal State
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showReLoginModal, setShowReLoginModal] = useState(false);
   const [addMethod, setAddMethod] = useState<"SELECT" | "TOKEN">("SELECT");
   const [tokenInput, setTokenInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
@@ -75,23 +121,20 @@ export function BotManagerPanel({
   const [syncInterval, setSyncInterval] = useState(0);
   const [editingSyncId, setEditingSyncId] = useState<string | null>(null);
 
+  // Tìm bot đang chọn trong danh sách REALTIME
   const selectedBot = bots.find((b) => b.id === selectedBotId);
   const isAdmin = userRole === "admin";
 
-  // --- Actions ---
-
+  // ... (Giữ nguyên các hàm handleAddByQR, handleAddByToken, handleUpdateToken, handleRetryOldToken, handleLoginQR, handleSyncManual, handleSaveSettings)
   const handleAddByQR = async () => {
     setIsProcessing(true);
     try {
       const newBot = await createPlaceholderBotAction();
-      // Gọi prop để parent set state QR active
       await onStartLogin(newBot.id);
-
-      onRefresh();
+      // onRefresh(); // Không cần gọi refresh thủ công nữa vì Realtime sẽ tự push bot mới về
       setSelectedBotId(newBot.id);
       setShowAddModal(false);
     } catch (e: unknown) {
-      // [FIX] Thay any bằng unknown
       const err = e instanceof Error ? e.message : String(e);
       alert("Lỗi: " + err);
     } finally {
@@ -104,7 +147,7 @@ export function BotManagerPanel({
     try {
       const res = await addBotWithTokenAction(tokenInput);
       if (res.success && res.botId) {
-        onRefresh();
+        // onRefresh(); // Realtime lo
         setSelectedBotId(res.botId);
         setShowAddModal(false);
         setTokenInput("");
@@ -112,7 +155,49 @@ export function BotManagerPanel({
         alert(res.error);
       }
     } catch (e: unknown) {
-      // [FIX] unknown
+      alert("Lỗi hệ thống: " + String(e));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleUpdateToken = async () => {
+    if (!selectedBotId) return;
+    setIsProcessing(true);
+    try {
+      const res = await updateBotTokenAction(selectedBotId, tokenInput);
+      if (res.success) {
+        alert("Đã cập nhật token và đăng nhập lại thành công!");
+        // onRefresh();
+        setShowReLoginModal(false);
+        setTokenInput("");
+      } else {
+        alert("Lỗi: " + res.error);
+      }
+    } catch (e: unknown) {
+      alert("Lỗi hệ thống: " + String(e));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleRetryOldToken = async (botId: string) => {
+    if (
+      !confirm(
+        "Hệ thống sẽ thử kết nối lại bằng Token hiện có trong Database. Tiếp tục?",
+      )
+    )
+      return;
+    setIsProcessing(true);
+    try {
+      const res = await retryBotLoginAction(botId);
+      if (res.success) {
+        alert("Đã gửi lệnh thử lại. Vui lòng chờ...");
+        // onRefresh();
+      } else {
+        alert("Thất bại: " + res.error);
+      }
+    } catch (e: unknown) {
       alert("Lỗi hệ thống: " + String(e));
     } finally {
       setIsProcessing(false);
@@ -120,15 +205,14 @@ export function BotManagerPanel({
   };
 
   const handleLoginQR = async (botId: string) => {
-    // Gọi prop từ parent thay vì gọi trực tiếp action, để parent update state activeQrBotId
     await onStartLogin(botId);
   };
 
   const handleSyncManual = async (botId: string) => {
     const res = await syncBotDataAction(botId);
     if (res.success) {
-      alert("Đã kích hoạt đồng bộ. Vui lòng đợi vài giây rồi làm mới trang.");
-      onRefresh();
+      alert("Đã kích hoạt đồng bộ.");
+      // onRefresh();
     } else {
       alert(res.error);
     }
@@ -137,31 +221,21 @@ export function BotManagerPanel({
   const handleSaveSettings = async (botId: string) => {
     await updateBotSyncSettingsAction(botId, syncInterval);
     setEditingSyncId(null);
-    onRefresh();
+    // onRefresh();
     alert("Đã lưu cấu hình.");
-  };
-
-  const handleReLogin = async (botId: string) => {
-    if (!confirm("Đăng nhập lại để làm mới token?")) return;
-    await retryBotLoginAction(botId);
-    onRefresh();
   };
 
   return (
     <div className="flex h-full w-full bg-gray-900 text-gray-100">
-      {/* 1. SIDEBAR LIST */}
+      {/* SIDEBAR */}
       <div className="w-80 flex flex-col border-r border-gray-800 bg-gray-900">
         <div className="p-4 border-b border-gray-800 flex justify-between items-center">
           <h2 className="font-bold text-lg text-white">Danh sách Bot</h2>
           <div className="flex gap-2">
-            <button
-              onClick={onRefresh}
-              className="p-1.5 bg-gray-800 hover:bg-gray-700 rounded text-gray-400"
-            >
-              <IconRefresh
-                className={`w-5 h-5 ${isLoading ? "animate-spin" : ""}`}
-              />
-            </button>
+            <div className="flex items-center gap-1 text-xs text-green-400 bg-green-900/20 px-2 py-1 rounded border border-green-900/50">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+              Realtime
+            </div>
             {isAdmin && (
               <button
                 onClick={() => setShowAddModal(true)}
@@ -206,7 +280,7 @@ export function BotManagerPanel({
         </div>
       </div>
 
-      {/* 2. MAIN CONTENT */}
+      {/* MAIN CONTENT */}
       <div className="flex-1 bg-gray-800 relative flex flex-col">
         {selectedBot ? (
           <div className="flex-1 p-8 overflow-y-auto">
@@ -254,61 +328,120 @@ export function BotManagerPanel({
               )}
             </div>
 
-            {/* Login & QR Section */}
+            {/* ERROR / OFFLINE SECTION */}
             {selectedBot.status?.state !== "LOGGED_IN" && (
               <div className="bg-gray-900 rounded-xl p-8 border border-gray-700 flex flex-col items-center mb-6">
-                {selectedBot.status?.state === "QR_WAITING" &&
-                qrCodeData &&
-                activeQrBotId === selectedBot.id ? (
-                  <div className="flex flex-col items-center animate-fade-in">
-                    <div className="bg-white p-3 rounded-xl mb-4 shadow-lg">
-                      <img
-                        src={qrCodeData}
-                        className="w-64 h-64 object-contain"
-                        alt="QR"
-                      />
+                {/* QR Display - Realtime update */}
+                {/* Lưu ý: qrCodeData vẫn đang được truyền từ cha (page.tsx) hoặc state cục bộ. 
+                    Nếu muốn realtime cả QR, ta nên lấy field qr_code từ bot object */}
+                {selectedBot.status?.state === "QR_WAITING" ? (
+                  selectedBot.status.qr_code ? (
+                    <div className="flex flex-col items-center animate-fade-in mb-6">
+                      <div className="bg-white p-3 rounded-xl mb-4 shadow-lg">
+                        <img
+                          src={selectedBot.status.qr_code}
+                          className="w-64 h-64 object-contain"
+                          alt="QR"
+                        />
+                      </div>
+                      <p className="text-blue-400 animate-pulse font-medium">
+                        Quét mã để đăng nhập
+                      </p>
                     </div>
-                    <p className="text-blue-400 animate-pulse font-medium">
-                      Quét mã để đăng nhập
-                    </p>
-                  </div>
-                ) : (
-                  <div className="text-center">
-                    <p className="text-gray-400 mb-4">
-                      Bot chưa kết nối hoặc phiên đã hết hạn.
-                    </p>
-                    <div className="flex gap-4 justify-center">
-                      <button
-                        onClick={() => handleLoginQR(selectedBot.id)}
-                        className="px-6 py-2 bg-blue-600 rounded text-white font-medium hover:bg-blue-500 shadow-lg"
-                      >
-                        Lấy mã QR
-                      </button>
-                      {isAdmin && (
-                        <button
-                          onClick={() => retryBotLoginAction(selectedBot.id)}
-                          className="px-6 py-2 bg-gray-700 rounded text-white font-medium hover:bg-gray-600"
-                        >
-                          Thử lại Token cũ
-                        </button>
-                      )}
+                  ) : (
+                    <div className="flex flex-col items-center animate-fade-in mb-6">
+                      <div className="w-64 h-64 bg-gray-800 rounded-xl flex items-center justify-center mb-4">
+                        <span className="animate-spin text-4xl">↻</span>
+                      </div>
+                      <p className="text-gray-400">Đang tạo mã QR...</p>
                     </div>
-                  </div>
-                )}
+                  )
+                ) : null}
+
+                {/* Error Message */}
                 {selectedBot.status?.state === "ERROR" && (
-                  <p className="mt-4 text-red-400 text-sm bg-red-900/20 px-4 py-2 rounded border border-red-900/50">
-                    Lỗi: {selectedBot.status.error_message}
-                  </p>
+                  <div className="mb-6 w-full max-w-2xl bg-red-900/20 border border-red-900/50 p-4 rounded-lg flex items-center gap-3">
+                    <span className="text-2xl">⚠️</span>
+                    <div>
+                      <p className="font-bold text-red-400 text-sm">
+                        Bot đã dừng hoạt động
+                      </p>
+                      <p className="text-xs text-red-300 opacity-80">
+                        {selectedBot.status.error_message}
+                      </p>
+                    </div>
+                  </div>
                 )}
+
+                {/* Recovery Actions (3 Options) */}
+                <div className="text-center w-full max-w-2xl">
+                  <p className="text-gray-400 mb-4 text-sm font-medium uppercase tracking-wider">
+                    Chọn phương thức khôi phục:
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* OPTION 1: RETRY OLD TOKEN */}
+                    <button
+                      onClick={() => handleRetryOldToken(selectedBot.id)}
+                      disabled={isProcessing}
+                      className="flex flex-col items-center justify-center p-4 bg-gray-800 hover:bg-yellow-600/20 border border-gray-700 hover:border-yellow-500 rounded-xl transition-all group"
+                    >
+                      <span className="text-2xl mb-2 group-hover:scale-110 transition-transform">
+                        🔄
+                      </span>
+                      <span className="font-bold text-white text-xs">
+                        Thử lại (Token Cũ)
+                      </span>
+                      <span className="text-[10px] text-gray-500 mt-1">
+                        Nếu chỉ lỗi mạng
+                      </span>
+                    </button>
+
+                    {/* OPTION 2: SCAN QR */}
+                    <button
+                      onClick={() => handleLoginQR(selectedBot.id)}
+                      disabled={isProcessing}
+                      className="flex flex-col items-center justify-center p-4 bg-gray-800 hover:bg-blue-600/20 border border-gray-700 hover:border-blue-500 rounded-xl transition-all group"
+                    >
+                      <span className="text-2xl mb-2 group-hover:scale-110 transition-transform">
+                        📱
+                      </span>
+                      <span className="font-bold text-white text-xs">
+                        Quét QR Mới
+                      </span>
+                      <span className="text-[10px] text-gray-500 mt-1">
+                        Tạo phiên mới
+                      </span>
+                    </button>
+
+                    {/* OPTION 3: NEW TOKEN */}
+                    <button
+                      onClick={() => {
+                        setTokenInput("");
+                        setShowReLoginModal(true);
+                      }}
+                      disabled={isProcessing}
+                      className="flex flex-col items-center justify-center p-4 bg-gray-800 hover:bg-purple-600/20 border border-gray-700 hover:border-purple-500 rounded-xl transition-all group"
+                    >
+                      <span className="text-2xl mb-2 group-hover:scale-110 transition-transform">
+                        🍪
+                      </span>
+                      <span className="font-bold text-white text-xs">
+                        Nhập Token Mới
+                      </span>
+                      <span className="text-[10px] text-gray-500 mt-1">
+                        Update thủ công
+                      </span>
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
-            {/* Settings & Info */}
+            {/* Panels (Status & Config) */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Status Card */}
               <div className="bg-gray-900/50 border border-gray-700 rounded-xl p-5">
                 <h3 className="font-bold text-white mb-4 flex items-center gap-2">
-                  <IconClock className="w-5 h-5 text-blue-400" /> Hoạt động
+                  <IconClock className="w-5 h-5 text-blue-400" /> Trạng thái
                 </h3>
                 <div className="space-y-3 text-sm text-gray-300">
                   <div className="flex justify-between">
@@ -317,24 +450,19 @@ export function BotManagerPanel({
                       {timeAgo(selectedBot.last_activity_at)}
                     </span>
                   </div>
-                  <div className="flex justify-between">
-                    <span>Cập nhật lúc:</span>
-                    <span className="text-white font-mono">
-                      {new Date(selectedBot.updated_at).toLocaleString()}
-                    </span>
-                  </div>
                   {selectedBot.status?.state === "LOGGED_IN" && (
                     <button
                       onClick={() => handleSyncManual(selectedBot.id)}
-                      className="w-full mt-4 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/50 rounded flex justify-center items-center gap-2 transition-colors"
+                      className="w-full mt-2 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/50 rounded flex justify-center items-center gap-2 transition-colors"
                     >
-                      <IconRefresh className="w-4 h-4" /> Đồng bộ dữ liệu ngay
+                      <IconRefresh className="w-4 h-4" /> Đồng bộ dữ liệu
                     </button>
                   )}
+                  {/* Realtime Log Display */}
+                  <HealthLog log={selectedBot.health_check_log} />
                 </div>
               </div>
 
-              {/* Config Card */}
               {isAdmin && (
                 <div className="bg-gray-900/50 border border-gray-700 rounded-xl p-5">
                   <div className="flex justify-between items-center mb-4">
@@ -356,40 +484,38 @@ export function BotManagerPanel({
                     </button>
                   </div>
 
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-xs text-gray-400 mb-2">
-                        Tự động đồng bộ (phút)
-                      </label>
-                      {editingSyncId === selectedBot.id ? (
-                        <div className="flex gap-2 animate-fade-in">
-                          <select
-                            className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500"
-                            value={syncInterval}
-                            onChange={(e) =>
-                              setSyncInterval(Number(e.target.value))
-                            }
-                          >
-                            <option value={0}>Tắt</option>
-                            <option value={15}>15 phút</option>
-                            <option value={30}>30 phút</option>
-                            <option value={60}>60 phút</option>
-                          </select>
-                          <button
-                            onClick={() => handleSaveSettings(selectedBot.id)}
-                            className="px-4 bg-purple-600 hover:bg-purple-500 rounded text-white text-sm font-bold transition-colors"
-                          >
-                            Lưu
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="text-sm text-white font-medium bg-gray-800 p-2 rounded border border-gray-700">
-                          {selectedBot.auto_sync_interval
-                            ? `${selectedBot.auto_sync_interval} phút`
-                            : "Đang tắt"}
-                        </div>
-                      )}
-                    </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-2">
+                      Tự động đồng bộ (phút)
+                    </label>
+                    {editingSyncId === selectedBot.id ? (
+                      <div className="flex gap-2 animate-fade-in">
+                        <select
+                          className="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-white text-sm"
+                          value={syncInterval}
+                          onChange={(e) =>
+                            setSyncInterval(Number(e.target.value))
+                          }
+                        >
+                          <option value={0}>Tắt</option>
+                          <option value={15}>15 phút</option>
+                          <option value={30}>30 phút</option>
+                          <option value={60}>60 phút</option>
+                        </select>
+                        <button
+                          onClick={() => handleSaveSettings(selectedBot.id)}
+                          className="px-4 bg-purple-600 hover:bg-purple-500 rounded text-white text-sm font-bold"
+                        >
+                          Lưu
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-white font-medium bg-gray-800 p-2 rounded border border-gray-700">
+                        {selectedBot.auto_sync_interval
+                          ? `${selectedBot.auto_sync_interval} phút`
+                          : "Đang tắt"}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -397,17 +523,13 @@ export function BotManagerPanel({
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-gray-500">
-            {isAdmin ? (
-              <IconUserPlus className="w-16 h-16 opacity-20 mb-4" />
-            ) : (
-              <div className="w-16 h-16 opacity-20 mb-4 bg-gray-700 rounded-full" />
-            )}
+            <IconUserPlus className="w-16 h-16 opacity-20 mb-4" />
             <p>Chọn một Bot để bắt đầu.</p>
           </div>
         )}
       </div>
 
-      {/* Modal Add Bot (Admin Only) */}
+      {/* MODAL ADD BOT */}
       {showAddModal && isAdmin && (
         <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-gray-800 border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-up">
@@ -426,27 +548,17 @@ export function BotManagerPanel({
                   <button
                     onClick={handleAddByQR}
                     disabled={isProcessing}
-                    className="p-6 bg-gray-700 hover:bg-blue-600/20 border border-gray-600 hover:border-blue-500 rounded-xl flex flex-col items-center transition-all group"
+                    className="p-6 bg-gray-700 hover:bg-blue-600/20 border border-gray-600 hover:border-blue-500 rounded-xl flex flex-col items-center transition-all"
                   >
-                    <span className="text-3xl mb-3 group-hover:scale-110 transition-transform">
-                      📱
-                    </span>
+                    <span className="text-2xl mb-2">📱</span>
                     <span className="font-bold text-white">Quét QR</span>
-                    <span className="text-xs text-gray-400 mt-1">
-                      Nhanh & An toàn
-                    </span>
                   </button>
                   <button
                     onClick={() => setAddMethod("TOKEN")}
-                    className="p-6 bg-gray-700 hover:bg-purple-600/20 border border-gray-600 hover:border-purple-500 rounded-xl flex flex-col items-center transition-all group"
+                    className="p-6 bg-gray-700 hover:bg-purple-600/20 border border-gray-600 hover:border-purple-500 rounded-xl flex flex-col items-center transition-all"
                   >
-                    <span className="text-3xl mb-3 group-hover:scale-110 transition-transform">
-                      🍪
-                    </span>
+                    <span className="text-2xl mb-2">🍪</span>
                     <span className="font-bold text-white">Nhập Token</span>
-                    <span className="text-xs text-gray-400 mt-1">
-                      Cookie & IMEI
-                    </span>
                   </button>
                 </div>
               ) : (
@@ -454,8 +566,8 @@ export function BotManagerPanel({
                   <textarea
                     value={tokenInput}
                     onChange={(e) => setTokenInput(e.target.value)}
-                    placeholder='{"cookie":..., "imei":..., "userAgent":...}'
-                    className="w-full h-40 bg-gray-900 border border-gray-600 rounded p-3 text-xs font-mono text-green-400 focus:border-purple-500 focus:outline-none resize-none"
+                    placeholder='{"cookie":..., "imei":...}'
+                    className="w-full h-40 bg-gray-900 border border-gray-600 rounded p-3 text-xs font-mono text-green-400 focus:outline-none"
                   />
                   <div className="flex justify-end gap-2">
                     <button
@@ -467,16 +579,58 @@ export function BotManagerPanel({
                     <button
                       onClick={handleAddByToken}
                       disabled={!tokenInput || isProcessing}
-                      className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-bold text-sm flex items-center gap-2"
+                      className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-bold text-sm"
                     >
-                      {isProcessing && (
-                        <IconRefresh className="w-4 h-4 animate-spin" />
-                      )}
                       Thêm ngay
                     </button>
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL RE-LOGIN (UPDATE TOKEN) */}
+      {showReLoginModal && isAdmin && (
+        <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-gray-800 border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-up">
+            <div className="p-4 border-b border-gray-700 flex justify-between bg-gray-900">
+              <h3 className="font-bold text-white">
+                Cập nhật Token cho: {selectedBot?.name}
+              </h3>
+              <button
+                onClick={() => setShowReLoginModal(false)}
+                className="text-gray-400 hover:text-white"
+              >
+                <IconClose className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-gray-400">
+                Nhập JSON Credentials mới để khôi phục kết nối cho bot này.
+              </p>
+              <textarea
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                placeholder='{"cookie":..., "imei":...}'
+                className="w-full h-40 bg-gray-900 border border-gray-600 rounded p-3 text-xs font-mono text-green-400 focus:outline-none"
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setShowReLoginModal(false)}
+                  className="px-4 py-2 text-sm text-gray-400 hover:text-white"
+                >
+                  Hủy
+                </button>
+                <button
+                  onClick={handleUpdateToken}
+                  disabled={!tokenInput || isProcessing}
+                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-bold text-sm flex items-center gap-2"
+                >
+                  {isProcessing ? "Đang xử lý..." : "Cập nhật & Đăng nhập"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
