@@ -1,28 +1,28 @@
 /**
  * app/api/system/setup-admin/route.ts
- * [TEMPORARY ENDPOINT] Dùng để khởi tạo tài khoản Admin đầu tiên.
- * Cần có SETUP_SECRET để bảo vệ.
+ * [SECURE UPDATE] Chỉ cho phép chạy khi chưa có tài khoản nào.
  */
 
 import { NextResponse } from "next/server";
 import supabase from "@/lib/supabaseServer";
 import { hashPassword } from "@/lib/utils/security";
 
-// Khóa bí mật tạm thời để tránh người lạ gọi API này
-const SETUP_SECRET = "zalolite-setup-secret-2024";
-
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { secret, username, password, fullName } = body;
+    // 1. Kiểm tra xem hệ thống đã khởi tạo chưa
+    const { count } = await supabase
+      .from("staff_accounts")
+      .select("*", { count: "exact", head: true });
 
-    // 1. Kiểm tra Secret Key
-    if (secret !== SETUP_SECRET) {
+    if (count && count > 0) {
       return NextResponse.json(
-        { error: "Unauthorized: Sai mã bí mật setup." },
-        { status: 401 },
+        { error: "Forbidden: Hệ thống đã có quản trị viên." },
+        { status: 403 },
       );
     }
+
+    const body = await req.json();
+    const { username, password, fullName } = body;
 
     if (!username || !password || !fullName) {
       return NextResponse.json(
@@ -31,24 +31,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2. Kiểm tra xem username đã tồn tại chưa
-    const { data: existing } = await supabase
-      .from("staff_accounts")
-      .select("id")
-      .eq("username", username)
-      .single();
-
-    if (existing) {
-      return NextResponse.json(
-        { error: `Tài khoản '${username}' đã tồn tại.` },
-        { status: 409 },
-      );
-    }
-
-    // 3. Mã hóa mật khẩu
+    // 2. Tạo Admin
     const hashedPassword = hashPassword(password);
 
-    // 4. Insert vào DB
     const { data, error } = await supabase
       .from("staff_accounts")
       .insert({
@@ -65,18 +50,11 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       success: true,
-      message: "Tạo tài khoản Admin thành công!",
-      data: {
-        id: data.id,
-        username: data.username,
-        role: data.role,
-      },
+      message: "Khởi tạo Admin đầu tiên thành công.",
+      data: { id: data.id, username: data.username },
     });
   } catch (error: unknown) {
-    // [FIX] Xử lý lỗi an toàn (Type Safe)
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error("[Setup API] Error:", errorMessage);
-
     return NextResponse.json(
       { error: "Lỗi Server: " + errorMessage },
       { status: 500 },
