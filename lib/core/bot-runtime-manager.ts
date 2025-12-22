@@ -1,9 +1,9 @@
 /**
  * lib/core/bot-runtime-manager.ts
- * [CORE ENGINE - V4.4 FULL RAW LOGGING]
- * - Lưu trữ toàn bộ object lỗi (không cắt string).
- * - Lưu trữ raw response khi ping thành công.
- * - Capture stack trace đầy đủ.
+ * [CORE ENGINE - V5.0 ACTIVE CHECK & SELF-HEALING]
+ * - [NEW] initSystem: Chạy ngay khi instrumentation gọi.
+ * - [UPDATE] restoreBotsFromDB: Logic chặt chẽ, update trạng thái ERROR nếu login thất bại.
+ * - [FIX] resetAllBotStatusOnStartup: Reset sạch sẽ trạng thái treo.
  */
 
 import { Zalo, API } from "zca-js";
@@ -37,9 +37,10 @@ export class BotRuntimeManager {
 
   private constructor() {
     console.log(
-      "[BotManager] 🚀 Khởi tạo Engine V4.5 (Centralized Error Reporting)...",
+      "[BotManager] 🚀 Khởi tạo Engine V5.0 (Eager Init & Strict Restore)...",
     );
     this.messagePipeline = new MessagePipeline();
+    // Khởi chạy hệ thống ngay lập tức
     this.initSystem();
   }
 
@@ -54,51 +55,93 @@ export class BotRuntimeManager {
 
   private async initSystem() {
     try {
+      console.log("[BotManager] ⏳ Starting Initialization Sequence...");
+      // 1. Reset trạng thái cũ (để tránh hiển thị sai là đang Online khi vừa reboot)
       await this.resetAllBotStatusOnStartup();
+
+      // 2. Phục hồi các bot đang Active
       await this.restoreBotsFromDB();
+
+      // 3. Bắt đầu vòng lặp bác sĩ khám bệnh
       this.startHealthCheckLoop();
     } catch (e) {
-      console.error("[BotManager] ❌ Init System Failed:", e);
+      console.error("[BotManager] ❌ Init System Critical Failure:", e);
     }
   }
 
-  // --- RESET & RESTORE ---
+  // --- RESET & RESTORE (STRICT MODE) ---
 
   private async resetAllBotStatusOnStartup() {
-    console.log("[BotManager] 🧹 Resetting Zombie Bots...");
-    await supabase
+    console.log("[BotManager] 🧹 Cleaning up zombie states...");
+    // Chỉ reset những bot đang (hoặc được cho là) chạy.
+    // Giữ nguyên trạng thái ERROR để admin biết mà fix.
+    const { error } = await supabase
       .from("zalo_bots")
       .update({
         status: {
           state: "STOPPED",
-          error_message: "System Restarted",
+          error_message: "System Rebooted - Restoring...",
           last_update: new Date().toISOString(),
         },
       })
       .neq("status->>state", "ERROR")
-      .neq("status->>state", "STOPPED");
+      .neq("status->>state", "STOPPED"); // Không cần update nếu đã stop
+
+    if (error) console.error("[BotManager] Reset DB Error:", error);
   }
 
   public async restoreBotsFromDB() {
     console.log("[BotManager] 🔄 Restoring Active Bots...");
-    const { data: bots } = await supabase
+    const { data: bots, error } = await supabase
       .from("zalo_bots")
       .select("*")
       .eq("is_active", true);
 
+    if (error) {
+      console.error("[BotManager] Fetch active bots failed:", error);
+      return;
+    }
+
     if (bots && bots.length > 0) {
-      console.log(`[BotManager] Found ${bots.length} active bots.`);
-      bots.forEach((b) => {
+      console.log(
+        `[BotManager] Found ${bots.length} active bots. Starting sequence...`,
+      );
+
+      // [IMPORTANT] Dùng for...of để xử lý tuần tự (Sequential) thay vì Promise.all
+      // Lý do: Tránh spike CPU/Memory nếu restore hàng loạt bot cùng lúc.
+      for (const b of bots) {
         const creds = b.access_token as ZaloCredentials | null;
-        if (creds && creds.cookie) {
-          this.loginWithCredentials(b.id, creds, b.auto_sync_interval).catch(
-            (e) => {
-              // Log raw lỗi khôi phục
-              console.warn(`[Restore] Failed ${b.name}:`, e);
-            },
+
+        if (!creds || !creds.cookie) {
+          console.warn(
+            `[Restore] ⚠️ Bot ${b.name} (${b.id}) has no credentials. Skipping.`,
           );
+          continue;
         }
-      });
+
+        try {
+          console.log(`[Restore] ▶️ Restoring ${b.name}...`);
+          // Gọi login và chờ kết quả
+          await this.loginWithCredentials(b.id, creds, b.auto_sync_interval);
+          console.log(`[Restore] ✅ Restored ${b.name} successfully.`);
+        } catch (e) {
+          // [STRICT HANDLING] Nếu restore thất bại (thường do Cookie die sau khi reboot)
+          // Phải tắt active ngay để tránh lặp lại ở lần reboot sau.
+          console.error(
+            `[Restore] ❌ Failed to restore ${b.name}. Deactivating...`,
+            e,
+          );
+
+          await this.handleBotDeath(b.id, e);
+          // Force update thêm is_active = false (handleBotDeath đã làm, nhưng confirm lại cho chắc logic restore)
+          await supabase
+            .from("zalo_bots")
+            .update({ is_active: false })
+            .eq("id", b.id);
+        }
+      }
+    } else {
+      console.log("[BotManager] No active bots found.");
     }
   }
 
@@ -106,6 +149,7 @@ export class BotRuntimeManager {
   public async reportError(botId: string, error: unknown) {
     await this.handleBotDeath(botId, error);
   }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private serializeError(error: any): any {
     if (typeof error === "object" && error !== null) {
@@ -151,7 +195,6 @@ export class BotRuntimeManager {
               status: "OK",
               message: "Ping success (Keep-alive)",
               latency: latency,
-              // Lưu raw response để debug nếu cần xem Zalo trả về gì
               raw_data: response,
             };
 
@@ -216,10 +259,8 @@ export class BotRuntimeManager {
           state: "ERROR",
           error_message: errStr,
           last_update: new Date().toISOString(),
-          // Lưu thêm context vào status nếu cần thiết debug nhanh
           debug_code: rawErr.code,
         },
-        // Đồng thời cập nhật luôn health_check_log với context "ERROR_HANDLER"
         health_check_log: {
           timestamp: new Date().toISOString(),
           action: "ERROR_HANDLER",
@@ -263,7 +304,7 @@ export class BotRuntimeManager {
       return { success: true };
     } catch (error: unknown) {
       console.error(`[BotManager] Login Failed (${botId})`);
-      await this.handleBotDeath(botId, error);
+      // Lỗi login -> throw để hàm restore bắt được và set is_active=false
       throw error;
     }
   }
@@ -331,7 +372,6 @@ export class BotRuntimeManager {
     await this.updateBotInfoAndHeartbeat(botId, api);
     this.setupMessageListener(botId, api);
 
-    // Log sự kiện login thành công
     await this.saveHealthCheckLog(botId, {
       timestamp: new Date().toISOString(),
       action: "LOGIN",
@@ -358,7 +398,7 @@ export class BotRuntimeManager {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     api.listener.on("error", async (err: any) => {
       console.error(`[BotManager] ⚡ Socket Error (${botId}):`, err);
-      // Ghi log raw lỗi socket
+      // Socket error -> Bot chết -> Ghi nhận cái chết
       await this.handleBotDeath(botId, err);
     });
     api.listener.start();
@@ -369,9 +409,7 @@ export class BotRuntimeManager {
       const res = await SyncService.syncAll(botId);
       if (res.success) {
         this.updateHeartbeat(botId);
-        // Log sync success (optional)
       } else {
-        // Sync lỗi -> Kill và ghi log raw
         await this.handleBotDeath(botId, res.error);
       }
     } catch (e) {
@@ -432,7 +470,6 @@ export class BotRuntimeManager {
         .eq("id", botId);
     } catch (e) {
       console.error("[BotManager] Update Info Error:", e);
-      // Lỗi update info cũng log raw
       await this.handleBotDeath(botId, e);
     }
   }
