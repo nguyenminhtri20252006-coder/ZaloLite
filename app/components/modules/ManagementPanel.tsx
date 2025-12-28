@@ -3,47 +3,44 @@
 /**
  * app/components/modules/ManagementPanel.tsx
  * Giao diện chính cho Tab "Quản lý".
- * CẬP NHẬT (GĐ 3.5): Thêm component con AddFriendPanel.
+ * [UPDATED] Bổ sung quản lý Lời mời nhận được (Incoming Requests).
  */
 
-import { useState, useEffect } from "react"; // SỬA ĐỔI: Thêm useEffect
-// SỬA ĐỔI (GĐ 3.6): Import thêm actions và types
+import { useState, useEffect } from "react";
 import {
   findUserAction,
   sendFriendRequestAction,
   getFriendRecommendationsAction,
   getSentFriendRequestAction,
-  acceptFriendRequestAction,
-  undoFriendRequestAction,
+  getIncomingFriendRequestAction, // [NEW] Import action lấy lời mời nhận được
+  handleFriendAction,
 } from "@/lib/actions/friend.actions";
 import { createGroupAction } from "@/lib/actions/group.actions";
 import {
   FindUserResponse,
   FriendRecommendationsRecommItem,
-  SentFriendRequestInfo,
   ThreadInfo,
   UserCacheEntry,
-  GetFriendRecommendationsResponse,
-  GetSentFriendRequestResponse,
+  ZaloUserResult, // Sử dụng Type chuẩn hóa
 } from "@/lib/types/zalo.types";
 import { Avatar } from "@/app/components/ui/Avatar";
-// SỬA ĐỔI (GĐ 3.6): Import thêm icons
 import {
   IconSearch,
   IconUserPlus,
   IconRefresh,
   IconCheck,
   IconClose,
-  IconUsers, // [FIX] Đã thêm import
+  IconUsers,
 } from "@/app/components/ui/Icons";
 import { UserDatabasePanel } from "./UserDatabasePanel";
 
-// --- CÁC SUB-COMPONENTS (Giữ nguyên logic, chỉ update import) ---
+// --- SUB-COMPONENT: Add Friend Panel ---
 
-function AddFriendPanel() {
+function AddFriendPanel({ botId }: { botId: string }) {
   const [phoneNumber, setPhoneNumber] = useState("");
-  const [friendRequestMessage, setFriendRequestMessage] = useState("");
-  const [foundUser, setFoundUser] = useState<FindUserResponse | null>(null);
+  const [friendRequestMessage, setFriendRequestMessage] =
+    useState("Kết bạn nhé!");
+  const [foundUser, setFoundUser] = useState<ZaloUserResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -57,15 +54,17 @@ function AddFriendPanel() {
     setError(null);
     setSuccess(null);
     setFoundUser(null);
-    setFriendRequestMessage("");
+
     try {
-      const result = await findUserAction(phoneNumber);
-      if (!result || !result.uid) {
-        throw new Error("Không tìm thấy người dùng với số điện thoại này.");
+      const result = await findUserAction(botId, phoneNumber);
+
+      if (!result.success || !result.data) {
+        throw new Error(
+          result.error || "Không tìm thấy người dùng với số điện thoại này.",
+        );
       }
-      setFoundUser(result);
+      setFoundUser(result.data);
     } catch (err: unknown) {
-      // [FIX] Xử lý lỗi 'unknown' thay vì 'any'
       const msg =
         err instanceof Error ? err.message : "Lỗi tìm kiếm không xác định";
       setError(`Lỗi tìm kiếm: ${msg}`);
@@ -75,19 +74,28 @@ function AddFriendPanel() {
   };
 
   const handleSendRequest = async () => {
-    if (!foundUser || !friendRequestMessage) return;
+    if (!foundUser) return;
     setIsLoading(true);
     setError(null);
     setSuccess(null);
 
     try {
-      await sendFriendRequestAction(friendRequestMessage, foundUser.uid);
-      setSuccess(`Đã gửi lời mời kết bạn đến ${foundUser.display_name}.`);
-      setFoundUser(null);
-      setPhoneNumber("");
-      setFriendRequestMessage("");
+      const targetId = foundUser.userId;
+      const res = await sendFriendRequestAction(
+        botId,
+        targetId,
+        friendRequestMessage,
+      );
+
+      if (res.success) {
+        setSuccess(`Đã gửi lời mời kết bạn đến ${foundUser.displayName}.`);
+        setFoundUser(null);
+        setPhoneNumber("");
+        setFriendRequestMessage("Kết bạn nhé!");
+      } else {
+        throw new Error(res.error);
+      }
     } catch (err: unknown) {
-      // [FIX] Xử lý lỗi 'unknown'
       const msg = err instanceof Error ? err.message : "Lỗi gửi lời mời";
       setError(`Lỗi gửi lời mời: ${msg}`);
     } finally {
@@ -124,16 +132,20 @@ function AddFriendPanel() {
         )}
         {error && <p className="text-sm text-red-400">{error}</p>}
         {success && <p className="text-sm text-green-400">{success}</p>}
+
         {foundUser && (
           <div className="mt-4 rounded-lg border border-gray-700 bg-gray-900/50 p-4">
             <div className="flex items-center gap-3">
-              <Avatar src={foundUser.avatar} alt={foundUser.display_name} />
+              <Avatar
+                src={foundUser.avatar}
+                alt={foundUser.displayName || "User"}
+              />
               <div className="flex-1">
                 <h3 className="font-semibold text-white">
-                  {foundUser.display_name}
+                  {foundUser.displayName}
                 </h3>
                 <p className="font-mono text-xs text-gray-400">
-                  {foundUser.uid}
+                  {foundUser.userId}
                 </p>
               </div>
             </div>
@@ -158,41 +170,62 @@ function AddFriendPanel() {
     </div>
   );
 }
-/**
- * THÊM MỚI (GĐ 3.6): Component con Quản lý Lời mời
- */
-function FriendRequestManager() {
-  const [tab, setTab] = useState<"recommended" | "sent">("recommended");
+
+// --- SUB-COMPONENT: Friend Request Manager ---
+
+function FriendRequestManager({ botId }: { botId: string }) {
+  // [UPDATE] Thêm tab 'incoming'
+  const [tab, setTab] = useState<"recommended" | "sent" | "incoming">(
+    "recommended",
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // State giữ data
+
   const [recommendations, setRecommendations] = useState<
     FriendRecommendationsRecommItem[]
   >([]);
-  const [sentRequests, setSentRequests] = useState<SentFriendRequestInfo[]>([]);
-  // State loading cho từng item
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [sentRequests, setSentRequests] = useState<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [incomingRequests, setIncomingRequests] = useState<any[]>([]);
+
   const [loadingActionId, setLoadingActionId] = useState<string | null>(null);
 
   const handleFetchData = async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const [recommResult, sentResult] = await Promise.all([
-        getFriendRecommendationsAction(),
-        getSentFriendRequestAction(),
+      const [recommResult, sentResult, incomingResult] = await Promise.all([
+        getFriendRecommendationsAction(botId),
+        getSentFriendRequestAction(botId),
+        getIncomingFriendRequestAction(botId), // [NEW] Fetch incoming
       ]);
 
-      // Ép kiểu an toàn hoặc kiểm tra dữ liệu
-      if (recommResult && Array.isArray(recommResult.recommItems)) {
-        setRecommendations(recommResult.recommItems);
+      if (
+        recommResult.success &&
+        recommResult.data &&
+        Array.isArray(recommResult.data.recommItems)
+      ) {
+        setRecommendations(recommResult.data.recommItems);
       }
 
-      // sentResult có thể là object { userId: info }, cần chuyển thành mảng
-      if (sentResult) {
-        setSentRequests(Object.values(sentResult));
+      if (sentResult.success && sentResult.data) {
+        const data = sentResult.data;
+        if (Array.isArray(data)) {
+          setSentRequests(data);
+        } else if (typeof data === "object") {
+          setSentRequests(Object.values(data));
+        }
+      }
+
+      // [NEW] Handle incoming requests
+      if (incomingResult.success && incomingResult.data) {
+        const data = incomingResult.data;
+        if (Array.isArray(data)) {
+          setIncomingRequests(data);
+        }
       }
     } catch (err: unknown) {
-      // [FIX] Xử lý lỗi 'unknown'
       const msg = err instanceof Error ? err.message : "Lỗi không xác định";
       setError(`Lỗi tải danh sách: ${msg}`);
     } finally {
@@ -201,28 +234,47 @@ function FriendRequestManager() {
   };
 
   useEffect(() => {
-    handleFetchData();
-  }, []);
+    if (botId) handleFetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [botId]);
 
-  const handleAcceptRequest = async (userId: string) => {
+  // Handle Accept/Reject for Incoming
+  const handleIncomingAction = async (
+    userId: string,
+    action: "accept" | "reject",
+  ) => {
     if (loadingActionId) return;
     setLoadingActionId(userId);
     try {
-      await acceptFriendRequestAction(userId);
+      await handleFriendAction(botId, userId, action);
       handleFetchData();
-    } catch (err: unknown) {
+    } catch (err) {
       console.error(err);
     } finally {
       setLoadingActionId(null);
     }
   };
 
+  // Handle Recommended
+  const handleAddRecommend = async (userId: string) => {
+    if (loadingActionId) return;
+    setLoadingActionId(userId);
+    try {
+      await sendFriendRequestAction(botId, userId, "Chào bạn!");
+      handleFetchData(); // Refresh list (maybe remove item)
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoadingActionId(null);
+    }
+  };
+
+  // Handle Sent (Undo)
   const handleUndoRequest = async (userId: string) => {
     if (loadingActionId) return;
     setLoadingActionId(userId);
     try {
-      await undoFriendRequestAction(userId);
-      // Tải lại data sau khi thành công
+      await handleFriendAction(botId, userId, "undo");
       handleFetchData();
     } catch (err: unknown) {
       console.error(err);
@@ -232,8 +284,8 @@ function FriendRequestManager() {
   };
 
   return (
-    <div className="rounded-lg bg-gray-800 p-4 shadow-lg h-full border border-gray-700">
-      <div className="flex items-center justify-between mb-3">
+    <div className="rounded-lg bg-gray-800 p-4 shadow-lg h-full border border-gray-700 flex flex-col">
+      <div className="flex items-center justify-between mb-3 shrink-0">
         <h2 className="text-xl font-semibold text-white">Quản lý Lời mời</h2>
         <button
           onClick={handleFetchData}
@@ -247,10 +299,10 @@ function FriendRequestManager() {
       </div>
 
       {/* --- Tabs --- */}
-      <div className="mb-3 flex rounded-lg bg-gray-700 p-1">
+      <div className="mb-3 flex rounded-lg bg-gray-700 p-1 shrink-0">
         <button
           onClick={() => setTab("recommended")}
-          className={`w-1/2 rounded-md py-2 text-xs font-medium transition-colors ${
+          className={`flex-1 rounded-md py-2 text-xs font-medium transition-colors ${
             tab === "recommended"
               ? "bg-blue-600 text-white"
               : "text-gray-300 hover:bg-gray-600"
@@ -259,8 +311,18 @@ function FriendRequestManager() {
           Gợi ý ({recommendations.length})
         </button>
         <button
+          onClick={() => setTab("incoming")}
+          className={`flex-1 rounded-md py-2 text-xs font-medium transition-colors ${
+            tab === "incoming"
+              ? "bg-green-600 text-white"
+              : "text-gray-300 hover:bg-gray-600"
+          }`}
+        >
+          Nhận ({incomingRequests.length})
+        </button>
+        <button
           onClick={() => setTab("sent")}
-          className={`w-1/2 rounded-md py-2 text-xs font-medium transition-colors ${
+          className={`flex-1 rounded-md py-2 text-xs font-medium transition-colors ${
             tab === "sent"
               ? "bg-blue-600 text-white"
               : "text-gray-300 hover:bg-gray-600"
@@ -274,81 +336,146 @@ function FriendRequestManager() {
         <p className="text-center text-xs text-red-400 mb-2">{error}</p>
       )}
 
-      <div className="flex flex-col gap-2 overflow-y-auto h-64 pr-1">
-        {tab === "recommended" ? (
-          recommendations.length === 0 ? (
-            <p className="text-center text-xs text-gray-500 mt-4">
-              Không có gợi ý kết bạn.
-            </p>
-          ) : (
-            recommendations.map((item) => (
-              <div
-                key={item.dataInfo.userId}
-                className="flex items-center gap-2 rounded-lg bg-gray-700/50 p-2"
-              >
-                <Avatar
-                  src={item.dataInfo.avatar}
-                  alt={item.dataInfo.displayName}
-                />
-                <div className="flex-1 overflow-hidden">
-                  <h4 className="truncate text-sm font-medium text-white">
-                    {item.dataInfo.displayName}
-                  </h4>
-                  <p className="truncate text-xs text-gray-400">
-                    {item.dataInfo.recommInfo.message}
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleAcceptRequest(item.dataInfo.userId)}
-                  disabled={!!loadingActionId}
-                  className="rounded-lg bg-green-600 p-1.5 text-white hover:bg-green-700"
+      <div className="flex-1 overflow-y-auto pr-1 space-y-2 max-h-[300px]">
+        {/* --- RECOMMENDED LIST --- */}
+        {tab === "recommended" && (
+          <>
+            {recommendations.length === 0 ? (
+              <p className="text-center text-xs text-gray-500 mt-4">
+                Không có gợi ý kết bạn.
+              </p>
+            ) : (
+              recommendations.map((item) => (
+                <div
+                  key={item.dataInfo.userId}
+                  className="flex items-center gap-2 rounded-lg bg-gray-700/50 p-2"
                 >
-                  <IconCheck className="h-4 w-4" />
-                </button>
-              </div>
-            ))
-          )
-        ) : sentRequests.length === 0 ? (
-          <p className="text-center text-xs text-gray-500 mt-4">
-            Chưa gửi lời mời nào.
-          </p>
-        ) : (
-          sentRequests.map((req) => (
-            <div
-              key={req.userId}
-              className="flex items-center gap-2 rounded-lg bg-gray-700/50 p-2"
-            >
-              <Avatar src={req.avatar} alt={req.displayName} />
-              <div className="flex-1 overflow-hidden">
-                <h4 className="truncate text-sm font-medium text-white">
-                  {req.displayName}
-                </h4>
-                <p className="truncate text-xs text-gray-400 italic">
-                  &quote{req.fReqInfo.message}&quote
-                </p>
-              </div>
-              <button
-                onClick={() => handleUndoRequest(req.userId)}
-                disabled={!!loadingActionId}
-                className="rounded-lg bg-gray-600 p-1.5 text-white hover:bg-gray-500"
-                title="Thu hồi"
-              >
-                <IconClose className="h-4 w-4" />
-              </button>
-            </div>
-          ))
+                  <Avatar
+                    src={item.dataInfo.avatar}
+                    alt={item.dataInfo.displayName}
+                  />
+                  <div className="flex-1 overflow-hidden">
+                    <h4 className="truncate text-sm font-medium text-white">
+                      {item.dataInfo.displayName}
+                    </h4>
+                    <p className="truncate text-xs text-gray-400">
+                      {item.dataInfo.recommInfo.message}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleAddRecommend(item.dataInfo.userId)}
+                    disabled={!!loadingActionId}
+                    className="rounded-lg bg-blue-600 p-1.5 text-white hover:bg-blue-700 disabled:opacity-50"
+                    title="Kết bạn"
+                  >
+                    <IconUserPlus className="h-4 w-4" />
+                  </button>
+                </div>
+              ))
+            )}
+          </>
+        )}
+
+        {/* --- INCOMING LIST --- */}
+        {tab === "incoming" && (
+          <>
+            {incomingRequests.length === 0 ? (
+              <p className="text-center text-xs text-gray-500 mt-4">
+                Không có lời mời nào.
+              </p>
+            ) : (
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              incomingRequests.map((req: any) => (
+                <div
+                  key={req.userId || req.uid || req.id}
+                  className="flex items-center gap-2 rounded-lg bg-gray-700/50 p-2"
+                >
+                  <Avatar src={req.avatar} alt={req.displayName || req.name} />
+                  <div className="flex-1 overflow-hidden">
+                    <h4 className="truncate text-sm font-medium text-white">
+                      {req.displayName || req.name || "Unknown"}
+                    </h4>
+                    <p className="truncate text-xs text-gray-400 italic">
+                      &quot;{req.msg || req.message}&quot;
+                    </p>
+                  </div>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={() =>
+                        handleIncomingAction(req.userId || req.uid, "accept")
+                      }
+                      disabled={!!loadingActionId}
+                      className="rounded-lg bg-green-600 p-1.5 text-white hover:bg-green-700 disabled:opacity-50"
+                      title="Chấp nhận"
+                    >
+                      <IconCheck className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={() =>
+                        handleIncomingAction(req.userId || req.uid, "reject")
+                      }
+                      disabled={!!loadingActionId}
+                      className="rounded-lg bg-gray-600 p-1.5 text-white hover:bg-gray-500 disabled:opacity-50"
+                      title="Từ chối"
+                    >
+                      <IconClose className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </>
+        )}
+
+        {/* --- SENT LIST --- */}
+        {tab === "sent" && (
+          <>
+            {sentRequests.length === 0 ? (
+              <p className="text-center text-xs text-gray-500 mt-4">
+                Chưa gửi lời mời nào.
+              </p>
+            ) : (
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              sentRequests.map((req: any) => (
+                <div
+                  key={req.userId || req.uid}
+                  className="flex items-center gap-2 rounded-lg bg-gray-700/50 p-2"
+                >
+                  <Avatar src={req.avatar} alt={req.displayName} />
+                  <div className="flex-1 overflow-hidden">
+                    <h4 className="truncate text-sm font-medium text-white">
+                      {req.displayName || req.name}
+                    </h4>
+                    <p className="truncate text-xs text-gray-400 italic">
+                      &quot;{req.fReqInfo?.message || ""}&quot;
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleUndoRequest(req.userId || req.uid)}
+                    disabled={!!loadingActionId}
+                    className="rounded-lg bg-gray-600 p-1.5 text-white hover:bg-gray-500 disabled:opacity-50"
+                    title="Thu hồi"
+                  >
+                    <IconClose className="h-4 w-4" />
+                  </button>
+                </div>
+              ))
+            )}
+          </>
         )}
       </div>
     </div>
   );
 }
-/**
- * THÊM MỚI (GĐ 3.7): Component con Tạo Nhóm
- */
+
+// --- SUB-COMPONENT: Create Group Panel ---
+
 function CreateGroupPanel({
+  botId,
   friendsList,
   onGroupCreated,
 }: {
+  botId: string;
   friendsList: ThreadInfo[];
   onGroupCreated: () => void;
 }) {
@@ -371,16 +498,20 @@ function CreateGroupPanel({
     setSuccess(null);
 
     try {
-      await createGroupAction({
+      const res = await createGroupAction(botId, {
         name: groupName,
         members: selectedMemberIds,
       });
-      setSuccess(`Tạo nhóm "${groupName}" thành công!`);
-      setGroupName("");
-      setSelectedMemberIds([]);
-      onGroupCreated();
+
+      if (res.success) {
+        setSuccess(`Tạo nhóm "${groupName}" thành công!`);
+        setGroupName("");
+        setSelectedMemberIds([]);
+        onGroupCreated();
+      } else {
+        throw new Error(res.error);
+      }
     } catch (err: unknown) {
-      // [FIX] Xử lý lỗi 'unknown'
       const msg = err instanceof Error ? err.message : "Lỗi tạo nhóm";
       setError(msg);
     } finally {
@@ -458,23 +589,22 @@ function CreateGroupPanel({
   );
 }
 
-// SỬA ĐỔI (GĐ 3.7): Nhận props và lọc danh sách bạn bè
+// --- MAIN COMPONENT ---
+
 export function ManagementPanel({
-  botId, // [NEW] Nhận botId từ BotInterface
+  botId,
   selectedThread,
   threads,
   onRefreshThreads,
-  // THÊM MỚI (Lô 4): Props cho User Cache
   userCache,
   onStartManualScan,
   isScanningAll,
   scanStatus,
 }: {
-  botId: string | null; // [NEW]
+  botId: string | null;
   selectedThread: ThreadInfo | null;
   threads: ThreadInfo[];
   onRefreshThreads: () => void;
-  // THÊM MỚI (Lô 4)
   userCache: Record<string, UserCacheEntry>;
   onStartManualScan: () => void;
   isScanningAll: boolean;
@@ -517,19 +647,26 @@ export function ManagementPanel({
       <div className="flex-1 overflow-y-auto p-6 bg-gray-850">
         {activeTab === "general" ? (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3 h-full">
-            <AddFriendPanel />
-            <FriendRequestManager />
-            <CreateGroupPanel
-              friendsList={friendsList}
-              onGroupCreated={onRefreshThreads}
-            />
-            {/* AdvancedGroupManager đã được chuyển sang DetailsPanel theo yêu cầu */}
+            {botId ? (
+              <>
+                <AddFriendPanel botId={botId} />
+                <FriendRequestManager botId={botId} />
+                <CreateGroupPanel
+                  botId={botId}
+                  friendsList={friendsList}
+                  onGroupCreated={onRefreshThreads}
+                />
+              </>
+            ) : (
+              <div className="col-span-3 flex items-center justify-center h-full text-gray-500">
+                Vui lòng chọn một Bot để sử dụng các tính năng quản lý.
+              </div>
+            )}
           </div>
         ) : (
           <div className="h-full">
-            {/* Tab Users: Chỉ hiển thị UserDatabasePanel full height */}
             <UserDatabasePanel
-              botId={botId} // [NEW] Truyền botId xuống
+              botId={botId}
               userCache={userCache}
               threads={threads}
               onStartManualScan={onStartManualScan}

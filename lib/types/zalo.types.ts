@@ -8,7 +8,7 @@ import type {
   User,
   GroupInfo,
   MessageContent as ZcaMessageContent,
-  FindUserResponse,
+  FindUserResponse as RawFindUserResponse, // Đổi tên để tránh nhầm lẫn
   CreateGroupOptions,
   GroupInfoResponse,
   GetGroupMembersInfoResponse,
@@ -18,7 +18,22 @@ import type {
   GetGroupLinkDetailResponse,
 } from "zca-js";
 
-// --- API RESPONSE TYPES (Simplified User) ---
+// --- UI NORMALIZED TYPES ---
+
+// Dữ liệu User đã được chuẩn hóa cho Frontend sử dụng
+export interface ZaloUserResult {
+  userId: string; // Luôn có giá trị string (đã map từ uid/id)
+  displayName: string; // Tên hiển thị (đã map từ display_name/name)
+  zaloName: string;
+  avatar: string;
+  phoneNumber?: string;
+  gender?: number;
+  // Giữ lại raw data nếu cần debug
+  raw?: unknown;
+}
+
+// Re-export type gốc dưới tên alias nếu cần
+export type FindUserResponse = RawFindUserResponse;
 
 export enum Gender {
   Male = 0,
@@ -67,6 +82,33 @@ export interface UserInfoResponse {
   changed_profiles: Record<string, ZaloAPIUser>;
 }
 
+export interface ZaloUserProfile {
+  userId: string;
+  displayName: string;
+  zaloName: string;
+  avatar: string;
+  cover: string;
+  gender: number;
+  dob: number;
+  sdob: string;
+  status: string;
+  phoneNumber?: string;
+}
+
+export interface ZaloPrivacySettings {
+  blockedUsers: string[]; // List UID bị chặn nhắn tin
+  blockedFeed: string[]; // List UID bị chặn xem nhật ký
+}
+
+// Type trả về của hàm getSettings (Cấu trúc giả định dựa trên ZCA behavior)
+export interface ZaloSettingsResponse {
+  privacy?: {
+    blacklist?: string[];
+    blockFeed?: string[];
+  };
+  // Các setting khác...
+}
+
 export interface FriendRecommendationsRecommItem {
   dataInfo: {
     userId: string;
@@ -84,7 +126,10 @@ export interface SentFriendRequestInfo {
   userId: string;
   displayName: string;
   avatar: string;
-  fReqInfo: { message: string; time: string };
+  fReqInfo: {
+    message: string;
+    time: string | number;
+  };
 }
 export interface GetSentFriendRequestResponse {
   [key: string]: SentFriendRequestInfo;
@@ -200,12 +245,12 @@ export interface AccountInfo {
 }
 
 export interface ThreadInfo {
-  id: string; // Global Hash ID (Dùng cho UI & Logic Business)
-  uuid?: string; // [NEW] Database UUID (Dùng để map Realtime)
+  id: string;
+  uuid?: string;
   name: string;
   avatar: string;
   type: 0 | 1;
-  lastActivity?: string; // [FIX] Optional field for DB mode
+  lastActivity?: string;
 }
 
 export type UserCacheEntry = {
@@ -279,7 +324,7 @@ export type {
   User,
   ZcaMessageContent,
   GroupInfo,
-  FindUserResponse,
+  RawFindUserResponse,
   CreateGroupOptions,
   GroupInfoResponse,
   GetGroupMembersInfoResponse,

@@ -42,6 +42,15 @@ export async function updateBotTokenAction(botId: string, tokenJson: string) {
   try {
     const manager = BotRuntimeManager.getInstance();
 
+    // Cập nhật DB trước để đảm bảo data mới nhất được lưu
+    await supabase
+      .from("zalo_bots")
+      .update({
+        access_token: credentials,
+        status: { state: "STARTING", error_message: null },
+      })
+      .eq("id", botId);
+
     // Thử login với credentials mới
     await manager.loginWithCredentials(botId, credentials);
 
@@ -129,6 +138,74 @@ export async function deleteBotAction(botId: string) {
   revalidatePath("/dashboard");
 }
 
+/**
+ * [NEW] STOP BOT ACTION (SOFT STOP)
+ * Ngừng hoạt động chủ động, giữ Token.
+ */
+export async function stopBotAction(botId: string) {
+  const manager = BotRuntimeManager.getInstance();
+
+  // 1. Dừng Runtime
+  await manager.stopBot(botId);
+
+  // 2. Update DB: Active = false, Status = STOPPED_BY_USER
+  // KHÔNG xóa access_token
+  const { error } = await supabase
+    .from("zalo_bots")
+    .update({
+      is_active: false,
+      status: {
+        state: "STOPPED",
+        error_message: "Tạm ngưng bởi người dùng",
+      },
+    })
+    .eq("id", botId);
+
+  if (error) throw new Error(error.message);
+
+  revalidatePath("/dashboard");
+  return { success: true };
+}
+
+/**
+ * [NEW] START BOT FROM SAVED TOKEN
+ */
+export async function startBotFromSavedTokenAction(botId: string) {
+  // Lấy token từ DB
+  const { data: bot, error } = await supabase
+    .from("zalo_bots")
+    .select("access_token, auto_sync_interval")
+    .eq("id", botId)
+    .single();
+
+  if (error || !bot || !bot.access_token) {
+    throw new Error("Không tìm thấy token đã lưu. Vui lòng đăng nhập lại.");
+  }
+
+  const manager = BotRuntimeManager.getInstance();
+
+  // Update DB trước: Active = true
+  await supabase
+    .from("zalo_bots")
+    .update({
+      is_active: true,
+      status: { state: "STARTING", error_message: null },
+    })
+    .eq("id", botId);
+
+  try {
+    await manager.loginWithCredentials(
+      botId,
+      bot.access_token,
+      bot.auto_sync_interval || 0,
+    );
+    revalidatePath("/dashboard");
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: String(e) };
+  }
+}
+
 export async function startBotLoginAction(botId: string) {
   // Staff được phép login bot mà họ có quyền "auth" hoặc "chat" (tùy policy, ở đây tạm mở cho người thấy bot)
   // Thực tế nên check thêm quyền 'auth' ở đây nếu muốn chặt chẽ hơn.
@@ -150,8 +227,28 @@ export async function addBotWithTokenAction(tokenJson: string) {
     return { success: false, error: "Format JSON không hợp lệ." };
   }
 
+  let newBotId: string | null = null;
+
   try {
-    const bot = await createPlaceholderBotAction(); // Hàm này đã check admin bên trong
+    // 1. Tạo Bot Placeholder & LƯU LUÔN Credentials vào DB
+    // Trạng thái ban đầu là STOPPED để tránh Runtime tự auto-start sai luồng
+    const tempName = `Imported Bot ${new Date().toLocaleTimeString()}`;
+    const { data: bot, error } = await supabase
+      .from("zalo_bots")
+      .insert({
+        name: tempName,
+        global_id: `import_${Date.now()}`, // Temporary ID
+        status: { state: "STOPPED" },
+        is_active: true,
+        access_token: credentials, // <--- LƯU NGAY LẬP TỨC
+        auto_sync_interval: 0,
+      })
+      .select()
+      .single();
+
+    if (error) throw new Error("DB Error: " + error.message);
+    newBotId = bot.id;
+
     const manager = BotRuntimeManager.getInstance();
     await manager.loginWithCredentials(bot.id, credentials);
 
@@ -159,34 +256,27 @@ export async function addBotWithTokenAction(tokenJson: string) {
     return { success: true, botId: bot.id };
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : String(error);
+    console.error("[AddBotToken] Error:", errMsg);
+
+    // Nếu đã tạo được bot nhưng login lỗi, ta trả về success=true nhưng kèm warning
+    // để UI redirect user về trang chi tiết bot (nơi hiển thị lỗi cụ thể)
+    if (newBotId) {
+      revalidatePath("/dashboard");
+      // Trả về success để đóng modal, user sẽ thấy bot ở trạng thái ERROR
+      return {
+        success: true,
+        botId: newBotId,
+        warning: "Bot đã được tạo nhưng đăng nhập thất bại: " + errMsg,
+      };
+    }
+
     return { success: false, error: errMsg };
   }
 }
 
 export async function retryBotLoginAction(botId: string) {
-  // Tương tự startBotLoginAction
-  const { data: bot } = await supabase
-    .from("zalo_bots")
-    .select("access_token, auto_sync_interval")
-    .eq("id", botId)
-    .single();
-
-  if (!bot || !bot.access_token) {
-    return { success: false, error: "Không tìm thấy token cũ." };
-  }
-
-  try {
-    const manager = BotRuntimeManager.getInstance();
-    await manager.loginWithCredentials(
-      botId,
-      bot.access_token,
-      bot.auto_sync_interval || 0,
-    );
-    return { success: true };
-  } catch (error: unknown) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    return { success: false, error: errMsg };
-  }
+  // Action này về cơ bản giống startBotFromSavedTokenAction nhưng semantic khác chút (Retry khi Error)
+  return startBotFromSavedTokenAction(botId);
 }
 
 export async function syncBotDataAction(botId: string) {
@@ -218,7 +308,7 @@ export async function updateBotSyncSettingsAction(
   botId: string,
   intervalMinutes: number,
 ) {
-  await requireAdmin(); // Chỉ Admin
+  await requireAdmin();
 
   try {
     await supabase
@@ -226,7 +316,8 @@ export async function updateBotSyncSettingsAction(
       .update({ auto_sync_interval: intervalMinutes })
       .eq("id", botId);
 
-    await retryBotLoginAction(botId);
+    // Restart bot để apply interval mới
+    await startBotFromSavedTokenAction(botId);
 
     revalidatePath("/dashboard");
     return { success: true };
@@ -236,7 +327,7 @@ export async function updateBotSyncSettingsAction(
 }
 
 export async function createPlaceholderBotAction() {
-  await requireAdmin(); // Chỉ Admin
+  await requireAdmin();
 
   const tempName = `New Bot ${new Date().toLocaleTimeString()}`;
   const { data, error } = await supabase

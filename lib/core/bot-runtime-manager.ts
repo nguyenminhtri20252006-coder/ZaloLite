@@ -7,6 +7,7 @@
  */
 
 import { Zalo, API } from "zca-js";
+import { HttpProxyAgent } from "http-proxy-agent";
 import supabase from "@/lib/supabaseServer";
 import { MessagePipeline } from "./pipelines/message-pipeline";
 import { ZaloBotStatus, HealthCheckLog } from "@/lib/types/database.types";
@@ -16,6 +17,7 @@ interface ZaloCredentials {
   imei: string;
   cookie: unknown;
   userAgent: string;
+  proxy?: string;
 }
 
 type BotRuntime = {
@@ -24,6 +26,7 @@ type BotRuntime = {
   status: ZaloBotStatus["state"];
   pollingInterval?: NodeJS.Timeout;
   lastPing?: number;
+  currentProxy?: string;
 };
 
 const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
@@ -36,9 +39,7 @@ export class BotRuntimeManager {
   private healthCheckTimer: NodeJS.Timeout | null = null;
 
   private constructor() {
-    console.log(
-      "[BotManager] 🚀 Khởi tạo Engine V5.0 (Eager Init & Strict Restore)...",
-    );
+    console.log("[BotManager] 🚀 Khởi tạo Engine V5.1 (Proxy Support)...");
     this.messagePipeline = new MessagePipeline();
     // Khởi chạy hệ thống ngay lập tức
     this.initSystem();
@@ -85,7 +86,7 @@ export class BotRuntimeManager {
         },
       })
       .neq("status->>state", "ERROR")
-      .neq("status->>state", "STOPPED"); // Không cần update nếu đã stop
+      .neq("status->>state", "STOPPED");
 
     if (error) console.error("[BotManager] Reset DB Error:", error);
   }
@@ -110,7 +111,8 @@ export class BotRuntimeManager {
       // [IMPORTANT] Dùng for...of để xử lý tuần tự (Sequential) thay vì Promise.all
       // Lý do: Tránh spike CPU/Memory nếu restore hàng loạt bot cùng lúc.
       for (const b of bots) {
-        const creds = b.access_token as ZaloCredentials | null;
+        // Cast type an toàn
+        const creds = b.access_token as unknown as ZaloCredentials | null;
 
         if (!creds || !creds.cookie) {
           console.warn(
@@ -120,24 +122,17 @@ export class BotRuntimeManager {
         }
 
         try {
-          console.log(`[Restore] ▶️ Restoring ${b.name}...`);
-          // Gọi login và chờ kết quả
+          console.log(
+            `[Restore] ▶️ Restoring ${b.name} (Proxy: ${
+              creds.proxy || "None"
+            })...`,
+          );
           await this.loginWithCredentials(b.id, creds, b.auto_sync_interval);
           console.log(`[Restore] ✅ Restored ${b.name} successfully.`);
         } catch (e) {
-          // [STRICT HANDLING] Nếu restore thất bại (thường do Cookie die sau khi reboot)
-          // Phải tắt active ngay để tránh lặp lại ở lần reboot sau.
-          console.error(
-            `[Restore] ❌ Failed to restore ${b.name}. Deactivating...`,
-            e,
-          );
-
+          console.error(`[Restore] ❌ Failed to restore ${b.name}.`, e);
+          // Restore thất bại -> Gọi handleBotDeath để quyết định có tắt luôn hay không
           await this.handleBotDeath(b.id, e);
-          // Force update thêm is_active = false (handleBotDeath đã làm, nhưng confirm lại cho chắc logic restore)
-          await supabase
-            .from("zalo_bots")
-            .update({ is_active: false })
-            .eq("id", b.id);
         }
       }
     } else {
@@ -221,7 +216,25 @@ export class BotRuntimeManager {
       }
     }, HEALTH_CHECK_INTERVAL);
   }
-
+  private async runHealthCheck() {
+    // Logic tách ra từ startHealthCheckLoop để code gọn hơn
+    // Thực hiện ping check như version cũ
+    const now = Date.now();
+    for (const [botId, runtime] of this.bots.entries()) {
+      if (runtime.status !== "LOGGED_IN" || !runtime.api) continue;
+      const lastActive = runtime.lastPing || 0;
+      if (now - lastActive > INACTIVE_THRESHOLD) {
+        // ... Perform Ping ...
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await runtime.api.fetchAccountInfo();
+          this.updateHeartbeat(botId);
+        } catch (e) {
+          await this.handleBotDeath(botId, e);
+        }
+      }
+    }
+  }
   private async saveHealthCheckLog(botId: string, log: HealthCheckLog) {
     try {
       await supabase
@@ -236,7 +249,7 @@ export class BotRuntimeManager {
   // --- STRICT ERROR HANDLING (FULL LOG) ---
   private async handleBotDeath(botId: string, error: unknown) {
     const rawErr = this.serializeError(error);
-    const errStr = rawErr.message || String(error);
+    const errStr = (rawErr.message || String(error)).toUpperCase();
 
     // Kiểm tra nếu bot đã chết rồi thì không spam update DB nữa
     const runtime = this.bots.get(botId);
@@ -249,43 +262,107 @@ export class BotRuntimeManager {
     // 1. Dừng Runtime
     await this.stopBot(botId);
 
-    // 2. Cập nhật DB: ERROR & IS_ACTIVE = FALSE
-    // Lưu full error message vào cột status
-    await supabase
-      .from("zalo_bots")
-      .update({
-        is_active: false,
-        status: {
-          state: "ERROR",
-          error_message: errStr,
-          last_update: new Date().toISOString(),
-          debug_code: rawErr.code,
-        },
-        health_check_log: {
-          timestamp: new Date().toISOString(),
-          action: "ERROR_HANDLER",
-          status: "FAIL",
-          message: errStr,
-          raw_data: rawErr,
-          error_stack: rawErr.stack,
-        },
-      })
-      .eq("id", botId);
+    // 2. Phân loại lỗi
+    // Các lỗi Fatal => Tắt is_active (Cần user can thiệp)
+    const isFatal =
+      errStr.includes("SESSION_EXPIRED") ||
+      errStr.includes("401") ||
+      errStr.includes("UNAUTHORIZED") ||
+      errStr.includes("VERIFY") || // Checkpoint verify
+      errStr.includes("-1357"); // Zalo Block
+
+    // Các lỗi Mạng/Hệ thống => Giữ is_active (Tự retry lần sau)
+    // (Mặc định là không fatal)
+
+    // 3. Chuẩn bị payload update
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updatePayload: any = {
+      status: {
+        state: "ERROR",
+        error_message: rawErr.message || String(error),
+        last_update: new Date().toISOString(),
+        debug_code: rawErr.code,
+      },
+      health_check_log: {
+        timestamp: new Date().toISOString(),
+        action: "ERROR_HANDLER",
+        status: "FAIL",
+        message: rawErr.message,
+        raw_data: rawErr,
+        error_stack: rawErr.stack,
+      },
+    };
+
+    if (isFatal) {
+      console.log(
+        `[BotManager] 🛑 Fatal Error detected. Disabling auto-restart for ${botId}.`,
+      );
+      updatePayload.is_active = false;
+    } else {
+      console.log(
+        `[BotManager] ⚠️ Temporary Error detected. Keeping auto-restart enabled for ${botId}.`,
+      );
+      // Không set is_active, giữ nguyên giá trị cũ trong DB (thường là true)
+    }
+
+    await supabase.from("zalo_bots").update(updatePayload).eq("id", botId);
   }
 
   // --- CORE ACTIONS ---
 
-  public getOrInitBot(botId: string): BotRuntime {
-    if (this.bots.has(botId)) return this.bots.get(botId)!;
-    const instance = new Zalo({ selfListen: true, logging: false });
-    const runtime: BotRuntime = {
-      instance,
-      api: null,
-      status: "STOPPED",
-      lastPing: Date.now(),
-    };
-    this.bots.set(botId, runtime);
-    return runtime;
+  /**
+   * [UPDATED] Lấy hoặc Khởi tạo Bot với cấu hình Proxy mới
+   * Nếu proxy thay đổi, sẽ tạo instance mới.
+   */
+  public getOrInitBot(botId: string, proxyUrl?: string): BotRuntime {
+    let runtime = this.bots.get(botId);
+
+    // Kiểm tra nếu cần tạo lại instance (do chưa có hoặc proxy thay đổi)
+    const needRecreate = !runtime || proxyUrl !== runtime.currentProxy;
+
+    if (needRecreate) {
+      if (runtime) {
+        // Cleanup cũ nếu có
+        console.log(
+          `[BotManager] ♻️ Recreating instance for ${botId} (Proxy changed or init)`,
+        );
+        this.stopBot(botId);
+      }
+
+      // Config cho Zalo Instance
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const zaloOptions: any = {
+        selfListen: true,
+        logging: false,
+      };
+
+      // [IMPORTANT] Setup Proxy Agent
+      if (proxyUrl && proxyUrl.trim() !== "") {
+        try {
+          // Sử dụng http-proxy-agent để support cả HTTP/HTTPS proxy
+          zaloOptions.httpAgent = new HttpProxyAgent(proxyUrl);
+          console.log(`[BotManager] 🌐 Configured Proxy for ${botId}`);
+        } catch (e) {
+          console.error(`[BotManager] ❌ Invalid Proxy URL for ${botId}:`, e);
+          // Vẫn tiếp tục tạo bot nhưng không có proxy, hoặc throw?
+          // Tốt nhất là throw để báo lỗi ngay
+          throw new Error(`Invalid Proxy URL: ${(e as Error).message}`);
+        }
+      }
+
+      const instance = new Zalo(zaloOptions);
+
+      runtime = {
+        instance,
+        api: null,
+        status: "STOPPED",
+        lastPing: Date.now(),
+        currentProxy: proxyUrl,
+      };
+      this.bots.set(botId, runtime);
+    }
+
+    return runtime!;
   }
 
   public async loginWithCredentials(
@@ -293,22 +370,30 @@ export class BotRuntimeManager {
     credentials: unknown,
     autoSyncInterval: number = 0,
   ) {
-    const runtime = this.getOrInitBot(botId);
+    const creds = credentials as ZaloCredentials;
+
+    // [UPDATE] Gọi getOrInitBot với tham số Proxy từ credentials
+    const runtime = this.getOrInitBot(botId, creds.proxy);
+
     await this.updateBotStatusInDB(botId, "STARTING");
     runtime.status = "STARTING";
 
     try {
+      // Login với credentials (cookie, imei, userAgent)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const api = await runtime.instance.login(credentials as any);
+      const api = await runtime.instance.login(creds as any);
+
+      // Nếu thành công -> Update DB & State
       await this.handleLoginSuccess(botId, api, autoSyncInterval);
       return { success: true };
     } catch (error: unknown) {
       console.error(`[BotManager] Login Failed (${botId})`);
-      // Lỗi login -> throw để hàm restore bắt được và set is_active=false
+      // Ném lỗi để caller xử lý hoặc handleBotDeath xử lý
+      // Ở đây ta để handleBotDeath xử lý việc update DB
+      await this.handleBotDeath(botId, error);
       throw error;
     }
   }
-
   public async startLoginQR(botId: string) {
     const runtime = this.getOrInitBot(botId);
     if (runtime.status === "LOGGED_IN") return;
@@ -348,7 +433,7 @@ export class BotRuntimeManager {
       }
       runtime.api = null;
       runtime.status = "STOPPED";
-      await this.updateBotStatusInDB(botId, "STOPPED");
+
       this.bots.delete(botId);
     }
   }
@@ -376,7 +461,7 @@ export class BotRuntimeManager {
       timestamp: new Date().toISOString(),
       action: "LOGIN",
       status: "OK",
-      message: "Login successful via Credentials/QR",
+      message: "Login successful",
       latency: 0,
     });
 
@@ -443,10 +528,14 @@ export class BotRuntimeManager {
         profile?.userId || profile?.id || profile?.uid || api.getOwnId();
 
       const context = api.getContext();
-      const credentials = {
+      // Merge context với runtime currentProxy để đảm bảo save đủ
+      const runtime = this.bots.get(botId);
+
+      const credentials: ZaloCredentials = {
         cookie: context.cookie,
         imei: context.imei,
         userAgent: context.userAgent,
+        proxy: runtime?.currentProxy, // Lưu lại proxy đang dùng vào DB
       };
 
       await supabase
@@ -457,7 +546,8 @@ export class BotRuntimeManager {
             profile?.displayName || profile?.zaloName || `Zalo Bot ${globalId}`,
           avatar: profile?.avatar || profile?.picture || "",
           raw_data: parsedInfo,
-          access_token: credentials,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          access_token: credentials as any, // Cast any do JSONB DB
           is_active: true,
           status: {
             state: "LOGGED_IN",
