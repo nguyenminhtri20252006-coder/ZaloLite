@@ -1,39 +1,58 @@
-"use client";
-
 /**
  * app/components/ui/Avatar.tsx
- *
- * Component Avatar (hiển thị ảnh hoặc fallback)
+ * [UPDATED] Added 'size' prop support.
  */
-import { useState } from "react";
-import { IconUser, IconUsers } from "./Icons";
+import React from "react";
 
-export function Avatar({
+interface AvatarProps {
+  src?: string | null;
+  alt: string;
+  isGroup?: boolean;
+  size?: "sm" | "md" | "lg" | "xl"; // Thêm prop size
+  className?: string;
+}
+
+export const Avatar: React.FC<AvatarProps> = ({
   src,
   alt,
   isGroup = false,
-}: {
-  src: string;
-  alt: string;
-  isGroup?: boolean;
-}) {
-  const [error, setError] = useState(false);
-  const Icon = isGroup ? IconUsers : IconUser;
+  size = "md",
+  className = "",
+}) => {
+  const fallbackInitial = alt ? alt.charAt(0).toUpperCase() : "?";
 
-  if (error || !src) {
-    return (
-      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-gray-600 object-cover">
-        <Icon className="h-6 w-6 text-gray-400" />
-      </div>
-    );
-  }
+  // Map size to dimension classes
+  const sizeClasses = {
+    sm: "w-8 h-8 text-xs",
+    md: "w-10 h-10 text-sm",
+    lg: "w-16 h-16 text-base",
+    xl: "w-24 h-24 text-xl", // Dùng cho DetailsPanel
+  };
+
+  const dimensions = sizeClasses[size];
 
   return (
-    <img
-      src={src}
-      alt={alt}
-      className="h-10 w-10 rounded-full object-cover"
-      onError={() => setError(true)}
-    />
+    <div
+      className={`relative rounded-full overflow-hidden flex-shrink-0 bg-gray-200 flex items-center justify-center border border-gray-300 ${dimensions} ${className}`}
+    >
+      {src ? (
+        <img
+          src={src}
+          alt={alt}
+          className="w-full h-full object-cover"
+          onError={(e) => {
+            e.currentTarget.style.display = "none";
+          }}
+        />
+      ) : (
+        <span className="font-bold text-gray-500">{fallbackInitial}</span>
+      )}
+      {/* Indicator nếu là nhóm (Optional) */}
+      {isGroup && (
+        <div className="absolute bottom-0 right-0 w-1/3 h-1/3 bg-blue-500 rounded-full border-2 border-white" />
+      )}
+    </div>
   );
-}
+};
+
+export default Avatar;

@@ -1,12 +1,48 @@
 /**
  * lib/types/database.types.ts
- * [UPDATED] Schema cho ZaloLite CRM (Self-Healing Ready).
- * Khớp với DB Schema SQL.
+ * [UPDATED] Thêm interface Database tổng thể để fix lỗi TypeScript.
  */
+
+// --- 1. CORE DATABASE INTERFACE (Supabase Standard) ---
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[];
+
+export interface Database {
+  public: {
+    Tables: {
+      messages: {
+        Row: Message; // Map tới interface Message chi tiết bên dưới
+        Insert: Partial<Message>; // Tạm thời dùng Partial cho Insert
+        Update: Partial<Message>;
+      };
+      zalo_bots: {
+        Row: ZaloBot;
+        Insert: Partial<ZaloBot>;
+        Update: Partial<ZaloBot>;
+      };
+      // Bạn có thể thêm các bảng khác vào đây nếu cần dùng type Database['public']['Tables']...
+      conversations: {
+        Row: Conversation;
+        Insert: Partial<Conversation>;
+        Update: Partial<Conversation>;
+      };
+    };
+  };
+}
+
+// --- 2. SPECIFIC TYPES (Existing) ---
 
 export type StaffRole = "admin" | "staff";
 export type BotPermissionType = "chat" | "auth" | "view_only";
-export type SenderType = "customer" | "staff_on_bot";
+
+// [UPDATED] Sender Type theo logic mới
+export type SenderType = "customer" | "staff" | "bot" | "other";
+
 export type ConversationType = "user" | "group";
 
 // --- STATUS TYPES ---
@@ -138,16 +174,33 @@ export interface ZaloConversationMapping {
 export interface Message {
   id: number;
   conversation_id: string;
-  bot_ids: string[];
   zalo_msg_id: string;
-  sender_id: string;
   sender_type: SenderType;
+
+  // Các trường định danh mới (Nullable)
+  customer_send_id?: string | null;
   staff_id?: string | null;
-  content: unknown;
-  raw_content: unknown;
+  bot_send_id?: string | null;
+
+  content: unknown; // JSONB
+  raw_content: unknown; // JSONB
   msg_type: string | null;
   sent_at: string;
   created_at: string;
+
+  // Relations (Dùng khi Join)
+  staff_account?: {
+    full_name: string;
+    avatar: string | null;
+  };
+  zalo_bot?: {
+    name: string;
+    avatar: string | null;
+  };
+  customer?: {
+    display_name: string;
+    avatar: string | null;
+  };
 }
 
 export interface AuditLog {

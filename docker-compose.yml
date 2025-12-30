@@ -1,22 +1,43 @@
-version: "3"
+version: "3.8"
 
 services:
-  zalo-lite:
-    container_name: zalo-lite-crm
+  # ------------------------------------------------
+  # Service chính: Zalo Tool CRM (Đã đổi tên)
+  # ------------------------------------------------
+  zalo-tool:
+    container_name: zalo-tool-crm
     build:
       context: .
       dockerfile: Dockerfile
+      # Truyền biến build-time (để in vào HTML)
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+
     restart: always
     ports:
       - "3000:3000"
-    environment:
-      # Copy các biến từ file .env của bạn vào đây
-      - NEXT_PUBLIC_SUPABASE_URL=https://giecjqcoelpuprzgrtsf.supabase.co
-      - NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpZWNqcWNvZWxwdXByemdydHNmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ2MzQ0MDgsImV4cCI6MjA4MDIxMDQwOH0.BbgeGSNmlAkdn4q9HlfF5nXkIE34NKzysFJWzKDYkPM
-      - SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdpZWNqcWNvZWxwdXByemdydHNmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDYzNDQwOCwiZXhwIjoyMDgwMjEwNDA4fQ.TcgJCI22dmrs_T907ULBXeY4wJYvaLWP0Gxw0zitKVI
 
-      # Timezone (quan trọng cho Zalo để hiển thị đúng giờ)
+    # Nạp biến runtime
+    env_file:
+      - .env
+
+    environment:
       - TZ=Asia/Ho_Chi_Minh
+      - NODE_ENV=production
+
+    # Lưu log ra ngoài máy Windows
     volumes:
-      # [Tùy chọn] Nếu muốn lưu log hoặc file session ra ngoài VPS
       - ./logs:/app/logs
+
+  # ------------------------------------------------
+  # Service phụ: Xem Log Realtime (Truy cập localhost:8888)
+  # ------------------------------------------------
+  log-viewer:
+    image: amir20/dozzle:latest
+    container_name: log-viewer
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8888:8080"

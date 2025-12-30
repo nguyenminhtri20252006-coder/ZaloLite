@@ -1,11 +1,10 @@
 /**
  * lib/core/pipelines/message-pipeline.ts
- * [PIPELINE STEP 3 - V3.0]
- * Logic: "Lazy Resolution" (Giải quyết định danh trễ).
- * 1. Nhận tin nhắn (chỉ có Numeric ID).
- * 2. Check DB Mapping -> Nếu có, dùng luôn.
- * 3. Nếu chưa có -> Gọi API Zalo lấy Hash ID -> Tạo mới Conversation/Customer chuẩn.
- * 4. [CRITICAL FIX] Insert đúng UUID vào bảng messages (thay vì raw ID).
+ * [PIPELINE STEP 3 - V4.0 FINAL]
+ * Logic:
+ * - SEPARATION: 1-on-1 Conversations are scoped by Bot ID (Format: HashID_BotID).
+ * - CRM: Customers are shared globally (Format: HashID).
+ * - GROUPS: Shared globally.
  */
 
 import supabase from "@/lib/supabaseServer";
@@ -26,150 +25,150 @@ export class MessagePipeline {
       const message = this.parser.parse(rawMsg);
       if (!message) return;
 
-      const numericThreadId = message.threadId; // ID Số
-      const numericSenderId = message.sender.uid; // ID Số (người gửi)
+      const numericThreadId = message.threadId;
+      const numericSenderId = message.sender.uid;
 
-      // [DEBUG]
-      console.log(
-        `[Pipeline] 📨 Processing Msg from Bot ${botId} | Thread(Num): ${numericThreadId} | MsgId: ${message.msgId}`,
-      );
+      // =======================================================================
+      // BƯỚC 1: ĐỊNH DANH (IDENTIFICATION) & FETCH INFO
+      // =======================================================================
 
-      // --- BƯỚC 1: GIẢI QUYẾT CONVERSATION UUID ---
-      let conversationUUID =
-        await ConversationService.findConversationByExternalId(
-          botId,
-          numericThreadId,
-        );
+      const api = BotRuntimeManager.getInstance().getBotAPI(botId);
 
-      if (!conversationUUID) {
-        console.log(
-          `[Pipeline] ⚠️ Conversation Mapping not found for ${numericThreadId}. Fetching Global Info...`,
-        );
-        // Chưa có trong DB -> Gọi API lấy Global Hash ID
-        const api = BotRuntimeManager.getInstance().getBotAPI(botId);
-        let globalHashId = "";
-        let name = message.isGroup ? `Group ${numericThreadId}` : "Unknown";
-        let avatar = "";
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let rawInfo: any = {};
+      // Biến lưu thông tin gốc từ Zalo
+      let rawGlobalId = ""; // ID Gốc của User/Group (Chưa gán BotID)
+      let name = message.isGroup ? `Group ${numericThreadId}` : "Unknown";
+      let avatar = "";
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let rawInfo: any = {};
+      let fetchSuccess = false;
 
-        try {
-          if (message.isGroup) {
-            // Lấy Info Group
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const groupInfo: any = await api.getGroupInfo([numericThreadId]);
-            const gData = groupInfo.gridInfoMap?.[numericThreadId];
-            if (gData) {
-              globalHashId = gData.globalId || gData.id; // Ưu tiên GlobalId
-              name = gData.name;
-              avatar = gData.avatar;
-              rawInfo = gData;
-            }
-          } else {
-            // Lấy Info User (1-1)
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const userInfo: any = await api.getUserInfo(numericThreadId);
-            // API user info thường trả về object key là ID
-            const uData = userInfo[numericThreadId];
-            if (uData) {
-              globalHashId = uData.globalId || uData.userId;
-              name = uData.displayName || uData.zaloName;
-              avatar = uData.avatar;
-              rawInfo = uData;
-            }
+      // 1.1 Cố gắng lấy thông tin từ Zalo để có Global ID chuẩn
+      try {
+        if (message.isGroup) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const groupInfoRes: any = await api.getGroupInfo([numericThreadId]);
+          const map = groupInfoRes?.gridInfoMap || {};
+          const targetKey =
+            Object.keys(map).find((k) => k === String(numericThreadId)) ||
+            Object.keys(map)[0];
+          const gData = map[targetKey];
+
+          if (gData) {
+            rawGlobalId = gData.globalId || gData.id || numericThreadId;
+            name = gData.name || name;
+            avatar = gData.avt || gData.fullAvt || gData.avatar || "";
+            rawInfo = gData;
+            fetchSuccess = true;
           }
-        } catch (apiErr) {
-          console.error(`[Pipeline] ❌ Failed to fetch Global Info:`, apiErr);
-          // Fallback cực đoan: Nếu không lấy được Hash, tạm dùng Numeric làm Hash (để không mất tin)
-          // Lưu ý: Điều này sẽ tạo ra dữ liệu "bẩn" nhưng chấp nhận được trong short-term
-          globalHashId = numericThreadId;
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const userInfo: any = await api.getUserInfo(numericThreadId);
+          const uData = userInfo[numericThreadId];
+          if (uData) {
+            rawGlobalId = uData.globalId || uData.userId || numericThreadId;
+            name = uData.displayName || uData.zaloName || name;
+            avatar = uData.avatar || "";
+            rawInfo = uData;
+            fetchSuccess = true;
+          }
         }
-
-        if (globalHashId) {
-          conversationUUID = await ConversationService.ensureConversation(
-            botId,
-            globalHashId, // Hash
-            numericThreadId, // Numeric
-            message.isGroup,
-            name,
-            avatar,
-            rawInfo,
-          );
-        }
+      } catch (apiErr) {
+        console.error(`[Pipeline] ❌ Fetch Info Error:`, apiErr);
       }
 
+      // Fallback nếu fetch lỗi
+      if (!rawGlobalId) rawGlobalId = numericThreadId;
+
+      // =======================================================================
+      // BƯỚC 2: TÁCH BIỆT LOGIC HỘI THOẠI (SEPARATION LOGIC)
+      // =======================================================================
+
+      // A. ID cho Bảng Conversations
+      // - Nếu là Group: Dùng chung ID (Shared Context)
+      // - Nếu là User: Dùng ID riêng theo Bot (Private Context) -> TRÁNH XUNG ĐỘT
+      let conversationGlobalId = rawGlobalId;
+      if (!message.isGroup) {
+        conversationGlobalId = `${rawGlobalId}_${botId}`;
+        // Ví dụ: 0GN8..._5439733e-58c3...
+      }
+
+      // B. ID cho Bảng Customers
+      // - Luôn dùng ID Gốc để CRM gom nhóm được lịch sử
+      const customerGlobalId = rawGlobalId;
+
+      // =======================================================================
+      // BƯỚC 3: CẬP NHẬT DATABASE (UPSERT)
+      // =======================================================================
+
+      // 3.1 Ensure Conversation (Với ID đã tách biệt)
+      const conversationUUID = await ConversationService.ensureConversation(
+        botId,
+        conversationGlobalId, // ID Hội thoại (Có thể đã gán suffix)
+        numericThreadId,
+        message.isGroup,
+        name,
+        avatar,
+        rawInfo,
+      );
+
       if (!conversationUUID) {
-        console.error(
-          `[Pipeline] ❌ Failed to resolve Conversation UUID. Dropping message.`,
-        );
+        console.error(`[Pipeline] ❌ Failed to ensure conversation.`);
         return;
       }
 
-      // --- BƯỚC 2: GIẢI QUYẾT SENDER UUID ---
-      let senderUUID: string;
+      // 3.2 Ensure Customer (Với ID Gốc - Shared CRM)
+      // Chỉ tạo Customer nếu đây là tin nhắn 1-1 hoặc người gửi trong nhóm
+      let customerUUID: string | null = null;
       let senderType = "customer";
+      let botSendId: string | null = null;
 
       if (message.isSelf) {
-        // Nếu là chính mình (Bot) -> Sender là Staff (hoặc Bot System)
-        senderType = "staff_on_bot";
-        senderUUID = botId; // UUID của Bot trong bảng zalo_bots
+        senderType = "bot";
+        botSendId = botId;
       } else {
-        // Nếu là khách -> Tìm hoặc Tạo Customer
-        let custUUID = await ConversationService.findCustomerByExternalId(
-          botId,
-          numericSenderId,
-        );
+        // Xử lý người gửi (Customer)
+        const senderNumericId = message.sender.uid;
 
-        if (!custUUID) {
-          console.log(
-            `[Pipeline] ⚠️ Customer Mapping not found for ${numericSenderId}. Fetching...`,
-          );
-          // Tương tự, gọi API lấy thông tin người gửi
-          try {
-            const api = BotRuntimeManager.getInstance().getBotAPI(botId);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const userInfo: any = await api.getUserInfo(numericSenderId);
-            const uData = userInfo[numericSenderId];
+        // Logic lấy info người gửi (nếu khác với threadId - tức là trong nhóm)
+        let senderGlobalId = senderNumericId;
+        let senderName = message.sender.name;
+        let senderAvatar = message.sender.avatar;
 
-            if (uData) {
-              const globalHash = uData.globalId || uData.userId;
-              custUUID = await ConversationService.ensureCustomer(
-                botId,
-                globalHash,
-                numericSenderId,
-                uData.displayName || message.sender.name,
-                uData.avatar || message.sender.avatar,
-                uData,
-              );
-            } else {
-              // Fallback nếu không fetch được
-              custUUID = await ConversationService.ensureCustomer(
-                botId,
-                numericSenderId, // Fallback Hash = Numeric
-                numericSenderId,
-                message.sender.name,
-                message.sender.avatar,
-              );
-            }
-          } catch (e) {
-            console.error("[Pipeline] Fetch Sender Error:", e);
-          }
+        // Nếu là chat 1-1, người gửi chính là người chat (đã fetch info ở trên)
+        if (
+          !message.isGroup &&
+          numericThreadId === numericSenderId &&
+          fetchSuccess
+        ) {
+          senderGlobalId = rawGlobalId; // Dùng ID chuẩn vừa fetch
+          senderName = name;
+          senderAvatar = avatar;
+        } else if (message.isGroup) {
+          // Trong nhóm, cần fetch info người gửi riêng nếu muốn chuẩn (Tạm thời dùng data từ message)
         }
-        // Nếu vẫn null sau khi cố gắng tạo (hiếm), dùng fallback string (không khuyến khích)
-        senderUUID = custUUID || numericSenderId;
+
+        customerUUID = await ConversationService.ensureCustomer(
+          botId,
+          senderGlobalId, // ID Gốc (Shared)
+          senderNumericId,
+          senderName,
+          senderAvatar,
+        );
       }
 
-      // --- BƯỚC 3: ATOMIC INSERT (FIXED SENDER_ID) ---
-      const msgType = (message.content as { type?: string }).type || "unknown";
+      // =======================================================================
+      // BƯỚC 4: INSERT TIN NHẮN
+      // =======================================================================
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const msgType = (message.content as any).type || "unknown";
 
       const { error: insertError } = await supabase.from("messages").insert({
         conversation_id: conversationUUID,
-        zalo_msg_id: message.msgId, // ID tin nhắn (để deduplicate)
-        bot_ids: [botId], // Đánh dấu bot này đã thấy tin
-
-        // [CRITICAL FIX] Sử dụng UUID chuẩn hóa thay vì Raw ID
-        sender_id: senderUUID,
+        zalo_msg_id: message.msgId,
         sender_type: senderType,
+
+        customer_send_id: customerUUID, // Link tới Customer Shared
+        bot_send_id: botSendId,
         staff_id: null,
 
         content: message.content,
@@ -179,46 +178,20 @@ export class MessagePipeline {
       });
 
       if (!insertError) {
-        console.log(`[Pipeline] ✅ Saved Msg ${message.msgId}`);
-        // Update Activity Time
+        console.log(
+          `[Pipeline] ✅ Saved Msg ${
+            message.msgId
+          } -> Conv: ${conversationGlobalId.substring(0, 15)}...`,
+        );
+        // Update last_activity
         await supabase
           .from("conversations")
           .update({ last_activity_at: new Date().toISOString() })
           .eq("id", conversationUUID);
       } else if (insertError.code === "23505") {
-        // Duplicate Key -> Merge Bot ID
-        console.log(
-          `[Pipeline] 🔄 Duplicate Msg ${message.msgId}. Merging BotID...`,
-        );
-        const { data: existingMsg } = await supabase
-          .from("messages")
-          .select("id, bot_ids")
-          .eq("conversation_id", conversationUUID)
-          .eq("zalo_msg_id", message.msgId)
-          .single();
-
-        if (existingMsg) {
-          const currentBotIds = (existingMsg.bot_ids as string[]) || [];
-          if (!currentBotIds.includes(botId)) {
-            const uniqueBots = Array.from(new Set([...currentBotIds, botId]));
-            await supabase
-              .from("messages")
-              .update({ bot_ids: uniqueBots })
-              .eq("id", existingMsg.id);
-
-            console.log(
-              `[Pipeline] 🔗 Merged Bot ${botId} into Msg ${message.msgId}`,
-            );
-          }
-        } else {
-          console.warn(
-            `[Pipeline] ⚠️ Duplicate error but msg not found? MsgId: ${message.msgId}`,
-          );
-        }
+        console.log(`[Pipeline] 🔄 Duplicate Msg ${message.msgId}. Skipped.`);
       } else {
-        console.error(
-          `[Pipeline] ❌ Insert Error: ${insertError.message} (Code: ${insertError.code})`,
-        );
+        console.error(`[Pipeline] ❌ Insert Error: ${insertError.message}`);
       }
     } catch (error) {
       console.error("[Pipeline] Critical Error:", error);

@@ -1,9 +1,3 @@
-/**
- * app/components/BotInterface.tsx
- * [FIXED REALTIME]
- * - Sử dụng 'uuid' từ danh sách threads để map tin nhắn Realtime về đúng 'Global Hash ID'.
- */
-
 "use client";
 
 import { useState, useRef, useEffect } from "react";
@@ -13,11 +7,12 @@ import {
   UserCacheEntry,
   ZaloMessage,
 } from "../../lib/types/zalo.types";
-import { ZaloBot } from "../../lib/types/database.types";
+import { ZaloBot, Message } from "../../lib/types/database.types";
 import { MainMenu } from "./modules/MainMenu";
 import { ConversationList } from "./modules/ConversationList";
 import { ChatFrame } from "./modules/ChatFrame";
-import { DetailsPanel } from "./modules/DetailsPanel";
+// [NEW IMPORT]
+import { ConversationInfoPanel } from "./modules/ConversationInfoPanel";
 import { BotManagerPanel } from "./modules/BotManagerPanel";
 import { StaffManagerPanel } from "./modules/StaffManagerPanel";
 import { ManagementPanel } from "./modules/ManagementPanel";
@@ -34,30 +29,88 @@ import {
 } from "../../lib/actions/chat.actions";
 import supabase from "../../lib/supabaseClient";
 import { usePresence } from "../../lib/hooks/usePresence";
-import { useWorkSession } from "../../lib/hooks/useWorkSession"; // [NEW IMPORT]
+import { useWorkSession } from "../../lib/hooks/useWorkSession";
 
 // Helper: Convert DB Message -> UI ZaloMessage (Append Mode)
 const convertDbMessageToUi = (
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  dbMsg: any,
+  dbMsg: Message,
   targetThreadId?: string,
+  // [NEW PARAMS] Context Data để enrich
+  botsList: ZaloBot[] = [],
+  userCache: Record<string, UserCacheEntry> = {},
+  currentStaff: { id: string; name: string; avatar?: string } | null = null,
+  currentThread: ThreadInfo | null = null, // [NEW PARAM]
 ): ZaloMessage => {
-  const rawData = dbMsg.raw_content?.data || {};
-  // Nếu không truyền targetThreadId (Hash), fallback về raw (Numeric) - nhưng sẽ lệch UI
-  const threadId = targetThreadId || dbMsg.raw_content?.threadId || "";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rawData = (dbMsg.raw_content as any)?.data || {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const threadId = targetThreadId || (dbMsg.raw_content as any)?.threadId || "";
+
+  // 1. Resolve Bot Info
+  const botInfo = dbMsg.bot_send_id
+    ? botsList.find((b) => b.id === dbMsg.bot_send_id)
+    : null;
+
+  // 2. Resolve Customer Info (from Cache)
+  // Logic: Nếu sender là customer, uidFrom là customer_send_id hoặc fallback zalo_msg_id (legacy)
+  const customerId = dbMsg.customer_send_id || dbMsg.zalo_msg_id;
+  // [AVATAR LOGIC UPDATE]
+  let customerName = "Khách hàng";
+  let customerAvatar = "";
+
+  // 1. Tìm trong cache
+  const cached = userCache[customerId];
+  if (cached) {
+    customerName = cached.name;
+    customerAvatar = cached.avatar;
+  }
+
+  // 2. Fallback: Nếu không có cache, VÀ đây là tin nhắn khách hàng trong hội thoại 1-1
+  // -> Lấy Avatar của chính hội thoại đó (vì hội thoại 1-1 thì avt hội thoại = avt khách)
+  if (
+    !customerAvatar &&
+    dbMsg.sender_type === "customer" &&
+    currentThread &&
+    currentThread.type === 0
+  ) {
+    customerAvatar = currentThread.avatar;
+    customerName = currentThread.name;
+  }
+  let staffInfo: { name: string; avatar?: string | null } | null = null;
+
+  if (dbMsg.staff_id) {
+    if (currentStaff && dbMsg.staff_id === currentStaff.id) {
+      staffInfo = {
+        name: currentStaff.name,
+        avatar: currentStaff.avatar,
+      };
+    }
+    // TODO: Nếu muốn hiện avatar đồng nghiệp realtime, cần fetchStaffById hoặc dùng cache peers từ usePresence
+  }
+
+  const extendedInfo = {
+    senderType: dbMsg.sender_type,
+    botSendId: dbMsg.bot_send_id,
+    staffInfo: staffInfo,
+    botInfo: botInfo ? { name: botInfo.name, avatar: botInfo.avatar } : null,
+    customerInfo: { name: customerName, avatar: customerAvatar }, // Luôn trả về object
+  };
 
   return {
     type: 0,
     threadId: threadId,
-    isSelf: dbMsg.sender_type === "staff_on_bot",
+    // [LOGIC FIX] isSelf chỉ đúng tương đối, UI ChatFrame sẽ tính lại dựa trên currentBotId
+    isSelf: dbMsg.sender_type === "staff" || dbMsg.sender_type === "bot",
     data: {
       msgId: dbMsg.zalo_msg_id,
       cliMsgId: dbMsg.zalo_msg_id,
       content: dbMsg.content,
       ts: new Date(dbMsg.sent_at).getTime().toString(),
-      uidFrom: dbMsg.sender_id,
+      uidFrom:
+        dbMsg.sender_type === "customer" ? customerId : dbMsg.bot_send_id || "",
       dName: rawData.dName || "",
       msgType: dbMsg.msg_type === "text" ? "webchat" : `chat.${dbMsg.msg_type}`,
+      ...extendedInfo,
     },
   };
 };
@@ -68,6 +121,7 @@ type BotInterfaceProps = {
     name: string;
     role: string;
     username: string;
+    avatar?: string;
   } | null;
   userCache?: Record<string, UserCacheEntry>;
 };
@@ -75,10 +129,8 @@ type BotInterfaceProps = {
 export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
   // [NEW] Kích hoạt tracking session
   useWorkSession();
-
   const [currentView, setCurrentView] = useState<ViewState>("chat");
 
-  // Layout Widths
   const [menuWidth, setMenuWidth] = useState(64);
   const [botListWidth, setBotListWidth] = useState(240);
   const [convListWidth, setConvListWidth] = useState(320);
@@ -94,7 +146,10 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
   const [selectedThread, setSelectedThread] = useState<ThreadInfo | null>(null);
   const [messages, setMessages] = useState<ZaloMessage[]>([]);
-  const [isDetailsPanelOpen, setIsDetailsPanelOpen] = useState(false);
+
+  // [STATE] Conversation Info Panel (CRM)
+  const [showConversationInfo, setShowConversationInfo] = useState(false);
+
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -107,8 +162,19 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
     username: staffInfo?.username || "Guest",
     fullName: staffInfo?.name || "Guest",
     role: staffInfo?.role || "staff",
-    avatar: "",
+    avatar: staffInfo?.avatar || "",
   });
+
+  // [REF] Refs để truy cập state mới nhất trong useEffect closure
+  const botsRef = useRef<ZaloBot[]>([]);
+  useEffect(() => {
+    botsRef.current = bots;
+  }, [bots]);
+
+  const userCacheRef = useRef<Record<string, UserCacheEntry>>({});
+  useEffect(() => {
+    userCacheRef.current = userCache;
+  }, [userCache]);
 
   const fetchBots = async () => {
     try {
@@ -196,46 +262,16 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
       "postgres_changes",
       { event: "INSERT", schema: "public", table: "messages" },
       (payload) => {
-        const newMsgRow = payload.new;
-        const botIds = newMsgRow.bot_ids as string[];
-        // UUID của hội thoại trong DB
+        const newMsgRow = payload.new as Message;
+        if (!newMsgRow || !newMsgRow.conversation_id) return;
+
         const conversationUUID = newMsgRow.conversation_id;
-
-        // 1. Filter: Chỉ xử lý nếu tin nhắn thuộc Bot đang active
-        if (!activeBotId || !botIds || !botIds.includes(activeBotId)) return;
-
-        // 2. Logic cập nhật UI Chat Frame (QUAN TRỌNG)
-        // Thay vì so sánh threadId (Zalo ID), ta so sánh UUID của DB
-        if (
-          selectedThreadRef.current &&
-          selectedThreadRef.current.uuid === conversationUUID
-        ) {
-          console.log(
-            `[Realtime] 🎯 Msg for SELECTED thread (UUID match): ${conversationUUID}`,
-          );
-
-          // Convert message, truyền ID Hash của thread đang chọn để đảm bảo UI khớp
-          const uiMsg = convertDbMessageToUi(
-            newMsgRow,
-            selectedThreadRef.current.id,
-          );
-
-          setMessages((prev) => {
-            if (prev.some((m) => m.data.msgId === uiMsg.data.msgId))
-              return prev;
-            return [...prev, uiMsg];
-          });
-        }
-
-        // 3. Logic cập nhật Sidebar (Thread List)
-        // Tìm xem thread này đã có trong list chưa (bằng UUID)
         const existingThreadIndex = threadsRef.current.findIndex(
           (t) => t.uuid === conversationUUID,
         );
 
         if (existingThreadIndex > -1) {
-          // Case A: Thread đã có trong list -> Đẩy lên đầu & Update time
-          console.log(`[Realtime] 🔄 Updating existing thread list...`);
+          // Update Sidebar
           setThreads((prev) => {
             const idx = prev.findIndex((t) => t.uuid === conversationUUID);
             if (idx > -1) {
@@ -249,11 +285,28 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
             }
             return prev;
           });
+
+          // Update Chat Frame
+          if (
+            selectedThreadRef.current &&
+            selectedThreadRef.current.uuid === conversationUUID
+          ) {
+            // [LOGIC FIX] Pass refs to enrich data
+            const uiMsg = convertDbMessageToUi(
+              newMsgRow,
+              selectedThreadRef.current.id,
+              botsRef.current,
+              userCacheRef.current,
+              staffInfo,
+              selectedThreadRef.current,
+            );
+            setMessages((prev) => {
+              if (prev.some((m) => m.data.msgId === uiMsg.data.msgId))
+                return prev;
+              return [...prev, uiMsg];
+            });
+          }
         } else {
-          // Case B: Thread mới (chưa có trong list) -> Fetch lại
-          console.log(
-            `[Realtime] 🆕 New thread detected (UUID: ${conversationUUID}), fetching list...`,
-          );
           fetchThreads();
         }
       },
@@ -306,21 +359,22 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
       e.preventDefault();
       setResizingTarget(target);
     };
+  const handleLoadMore = (oldMsgs: ZaloMessage[]) => {
+    setMessages((prev) => [...oldMsgs, ...prev]);
+  };
   useEffect(() => {
     const handleMove = (e: MouseEvent) => {
       if (!resizingTarget || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
       if (resizingTarget === "MENU") {
-        const newW = Math.max(64, Math.min(x, 300));
-        setMenuWidth(newW);
-        setIsMenuExpanded(newW > 100);
+        setMenuWidth(Math.max(64, Math.min(x, 300)));
       } else if (resizingTarget === "BOT_LIST") {
-        const newW = Math.max(64, Math.min(x - menuWidth, 400));
-        setBotListWidth(newW);
+        setBotListWidth(Math.max(64, Math.min(x - menuWidth, 400)));
       } else if (resizingTarget === "CONV_LIST") {
-        const newW = Math.max(200, Math.min(x - menuWidth - botListWidth, 600));
-        setConvListWidth(newW);
+        setConvListWidth(
+          Math.max(200, Math.min(x - menuWidth - botListWidth, 600)),
+        );
       }
     };
     const handleUp = () => setResizingTarget(null);
@@ -347,12 +401,8 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
       >
         <MainMenu
           staffInfo={staffInfo}
-          isExpanded={isMenuExpanded}
-          onToggleMenu={() => {
-            const target = isMenuExpanded ? 64 : 240;
-            setMenuWidth(target);
-            setIsMenuExpanded(!isMenuExpanded);
-          }}
+          isExpanded={menuWidth > 100}
+          onToggleMenu={() => setMenuWidth(menuWidth > 100 ? 64 : 240)}
           currentView={currentView}
           onChangeView={setCurrentView}
           customWidth={menuWidth}
@@ -409,21 +459,24 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
               thread={selectedThread}
               messages={messages}
               onSendMessage={handleSendMessage}
-              onToggleDetails={() => setIsDetailsPanelOpen(!isDetailsPanelOpen)}
+              onToggleDetails={() =>
+                setShowConversationInfo(!showConversationInfo)
+              }
               isEchoBotEnabled={false}
               onToggleEchoBot={() => {}}
               isSendingMessage={false}
               onSetError={(msg) => console.error(msg)}
               userCache={userCache}
+              currentBotId={activeBotId}
+              onLoadMore={handleLoadMore}
             />
-            {isDetailsPanelOpen && (
-              <DetailsPanel
-                botId={activeBotId}
+
+            {/* PANEL THÔNG TIN HỘI THOẠI (CRM) */}
+            {showConversationInfo && selectedThread && (
+              <ConversationInfoPanel
+                bot={bots.find((b) => b.id === activeBotId) || null}
                 thread={selectedThread}
-                onClose={() => setIsDetailsPanelOpen(false)}
-                onRefreshThreads={fetchThreads}
-                onClearSelectedThread={() => setSelectedThread(null)}
-                threads={threads}
+                onClose={() => setShowConversationInfo(false)}
               />
             )}
           </div>
@@ -437,11 +490,12 @@ export function BotInterface({ staffInfo, userCache = {} }: BotInterfaceProps) {
             await deleteBotAction(id);
             fetchBots();
           }}
-          onStartLogin={async (id: string) => {
+          onStartLogin={async (id) => {
             setActiveQrBotId(id);
             await startBotLoginAction(id);
           }}
           activeQrBotId={activeQrBotId}
+          setActiveQrBotId={setActiveQrBotId} // [FIXED] Đã truyền hàm setter
           qrCodeData={qrCodeData}
           userRole={staffInfo?.role || "staff"}
         />

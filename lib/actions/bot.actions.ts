@@ -22,6 +22,31 @@ async function requireAdmin() {
   }
   return session;
 }
+export async function stopBotAction(botId: string) {
+  try {
+    // 1. Dừng Runtime (Hủy kết nối Socket, xóa Instance khỏi bộ nhớ)
+    console.log(`[Action] Stopping Bot ${botId}...`);
+    BotRuntimeManager.getInstance().stopBot(botId);
+
+    // 2. Cập nhật trạng thái Database
+    const { error } = await supabase
+      .from("zalo_bots")
+      .update({
+        status: { state: "STOPPED", last_update: new Date().toISOString() },
+        is_active: false, // Đánh dấu không active
+      })
+      .eq("id", botId);
+
+    if (error) throw new Error(error.message);
+
+    revalidatePath("/dashboard/bot-manager");
+    return { success: true };
+  } catch (error: unknown) {
+    const err = error instanceof Error ? error.message : String(error);
+    console.error("[Action] Stop Bot Error:", err);
+    return { success: false, error: err };
+  }
+}
 
 /**
  * [NEW] Cập nhật Token cho Bot đang tồn tại (Dùng để Re-login)
@@ -136,35 +161,6 @@ export async function deleteBotAction(botId: string) {
   const manager = BotRuntimeManager.getInstance();
   await manager.stopBot(botId);
   revalidatePath("/dashboard");
-}
-
-/**
- * [NEW] STOP BOT ACTION (SOFT STOP)
- * Ngừng hoạt động chủ động, giữ Token.
- */
-export async function stopBotAction(botId: string) {
-  const manager = BotRuntimeManager.getInstance();
-
-  // 1. Dừng Runtime
-  await manager.stopBot(botId);
-
-  // 2. Update DB: Active = false, Status = STOPPED_BY_USER
-  // KHÔNG xóa access_token
-  const { error } = await supabase
-    .from("zalo_bots")
-    .update({
-      is_active: false,
-      status: {
-        state: "STOPPED",
-        error_message: "Tạm ngưng bởi người dùng",
-      },
-    })
-    .eq("id", botId);
-
-  if (error) throw new Error(error.message);
-
-  revalidatePath("/dashboard");
-  return { success: true };
 }
 
 /**

@@ -1,3 +1,8 @@
+/**
+ * app/(dashboard)/bot-manager/page.tsx
+ * [UPDATED] Fix Build Error: Pass 'userRole' & 'onCreateBot' to Panel.
+ */
+
 "use client";
 
 import { useState, useEffect, useRef } from "react";
@@ -9,40 +14,46 @@ import {
   deleteBotAction,
   startBotLoginAction,
 } from "@/lib/actions/bot.actions";
-import { ZALO_EVENTS } from "@/lib/types/zalo.types"; // [FIX] Import ZALO_EVENTS từ types
+import { getStaffSession } from "@/lib/actions/staff.actions"; // [NEW] Import để lấy role
 
 export default function BotManagerPage() {
   const [bots, setBots] = useState<ZaloBot[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [userRole, setUserRole] = useState<string>("staff"); // [NEW] State lưu role
 
   // State quản lý QR Code Flow
   const [activeQrBotId, setActiveQrBotId] = useState<string | null>(null);
   const [qrCodeData, setQrCodeData] = useState<string | null>(null);
 
-  // SSE Ref
+  // SSE Ref (Giữ nguyên logic cũ nếu còn dùng, dù BotInterface đã có Realtime riêng)
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // --- 1. Data Fetching ---
-  const fetchBots = async () => {
+  const fetchData = async () => {
     setIsLoading(true);
     try {
-      const data = await getBotsAction();
-      setBots(data);
+      // Fetch Bots
+      const botsData = await getBotsAction();
+      setBots(botsData);
+
+      // Fetch User Role
+      const session = await getStaffSession();
+      if (session) setUserRole(session.role);
     } catch (error) {
-      console.error("Failed to fetch bots:", error);
+      console.error("Failed to fetch data:", error);
     } finally {
       setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchBots();
+    fetchData();
   }, []);
 
   // --- Helper: Update state local để UI phản hồi nhanh ---
   const updateBotStatusLocally = (
     botId: string,
-    state: ZaloBotStatus["state"], // [FIX] Thay 'any' bằng type chuẩn
+    state: ZaloBotStatus["state"],
     error?: string,
   ) => {
     setBots((prev) =>
@@ -56,41 +67,11 @@ export default function BotManagerPage() {
     );
   };
 
-  // --- 2. SSE Listener (Realtime Status & QR) ---
-  useEffect(() => {
-    // [LƯU Ý] Trong production thực tế, nên dùng Supabase Realtime thay vì SSE tùy biến
-    // Tuy nhiên, để tương thích với code hiện tại, ta giữ nguyên SSE nếu endpoint tồn tại
-    // Hoặc nếu bạn đã chuyển sang Supabase Realtime ở BotInterface, đoạn này có thể thừa.
-    // Dưới đây là logic SSE như cũ:
-
-    if (eventSourceRef.current) return;
-
-    // Chỉ connect nếu endpoint tồn tại (API route /api/zalo-events)
-    // Nếu endpoint này đã bị deprecated (trả về 410), logic này sẽ không chạy hiệu quả.
-    // Nhưng để fix lỗi build, ta cứ giữ nguyên logic type-safe.
-
-    /* FIXME: Nếu bạn đã chuyển hẳn sang Supabase Realtime (như trong BotInterface), 
-      hãy cân nhắc xóa block useEffect này và dùng Supabase subscription tương tự BotInterface.
-      Hiện tại tôi sẽ fix lỗi type cho đoạn này.
-    */
-
-    // console.log("[UI] Connecting to SSE for Bot Status...");
-    // eventSourceRef.current = new EventSource("/api/zalo-events");
-
-    // ... (Logic SSE cũ nếu cần)
-
-    return () => {
-      eventSourceRef.current?.close();
-      eventSourceRef.current = null;
-    };
-  }, [activeQrBotId]);
-
-  // --- 3. Handlers ---
-
+  // --- 2. Handlers ---
   const handleCreateBot = async (name: string) => {
     try {
       await createBotAction(name);
-      fetchBots(); // Reload list
+      fetchData(); // Reload list
     } catch (e) {
       alert("Lỗi tạo bot: " + (e as Error).message);
     }
@@ -129,12 +110,14 @@ export default function BotManagerPage() {
     <BotManagerPanel
       bots={bots}
       isLoading={isLoading}
-      onRefresh={fetchBots}
-      onCreateBot={handleCreateBot}
+      onRefresh={fetchData}
+      onCreateBot={handleCreateBot} // [FIX] Truyền prop này
       onDeleteBot={handleDeleteBot}
       onStartLogin={handleStartLogin}
       activeQrBotId={activeQrBotId}
+      setActiveQrBotId={setActiveQrBotId}
       qrCodeData={qrCodeData}
+      userRole={userRole} // [FIX] Truyền prop này (Admin mới thấy nút Xóa/Thêm)
     />
   );
 }

@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   /* config options here */
+  output: "standalone",
 
   experimental: {
     // serverActions nằm trong experimental trong các bản Next.js mới nhất (14+)

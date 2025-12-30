@@ -1,56 +1,77 @@
-# Giai đoạn 1: Cài đặt dependencies
-# Sử dụng node:18-alpine hoặc 20-alpine vì nhẹ và bảo mật
-FROM node:18-alpine AS deps
-# Cài đặt libc6-compat vì thư viện xử lý ảnh (sharp) thường cần nó trên Alpine
+# ==========================================
+# Giai đoạn 1: Install Dependencies (Deps)
+# ==========================================
+FROM node:20-alpine AS deps
+# Cài thêm libc6-compat để hỗ trợ thư viện xử lý ảnh hoặc native (quan trọng cho Alpine)
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 
-# Copy package.json và lock file trước để tận dụng cache layer của Docker
+# Copy package files
 COPY package.json package-lock.json ./
 
-# Cài đặt dependencies (dùng npm ci để cài chính xác version trong lock file)
-RUN npm ci
+# Cài đặt dependencies (dùng --legacy-peer-deps để tránh lỗi version conflict nếu có)
+RUN npm ci --legacy-peer-deps
 
-# Giai đoạn 2: Build ứng dụng
-FROM node:18-alpine AS builder
+# ==========================================
+# Giai đoạn 2: Build Application (Builder)
+# ==========================================
+FROM node:20-alpine AS builder
 WORKDIR /app
+
+# Copy dependencies từ stage trước
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Tắt Next.js telemetry
+# [QUAN TRỌNG] Khai báo ARG để nhận biến môi trường lúc build
+# Next.js cần các biến NEXT_PUBLIC_ ngay tại thời điểm build để in vào code Client
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+# Gán giá trị ARG vào ENV để tiến trình build của Next.js đọc được
+ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+
+# Tắt Telemetry
 ENV NEXT_TELEMETRY_DISABLED 1
 
-# Build project (sẽ tạo ra thư mục .next/standalone nhờ config ở Bước 1)
+# Thực hiện build
 RUN npm run build
 
-# Giai đoạn 3: Runner (Image cuối cùng để chạy)
-FROM node:18-alpine AS runner
+# ==========================================
+# Giai đoạn 3: Production Runner (Runner)
+# ==========================================
+FROM node:20-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV production
 ENV NEXT_TELEMETRY_DISABLED 1
 
-# Tạo user system để chạy app (bảo mật hơn root)
+# Tạo user non-root
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Copy thư mục public (các file tĩnh như logo, icon)
+# Copy file public (ảnh, fonts...)
 COPY --from=builder /app/public ./public
 
-# Copy kết quả build standalone
-# Thư mục .next/standalone chứa code server tối giản
+# Setup folder .next và quyền
+RUN mkdir .next
+RUN chown nextjs:nodejs .next
+
+# Copy output Standalone (Tính năng này giúp image siêu nhẹ)
+# Đảm bảo bạn đã có output: 'standalone' trong next.config.ts / .js
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-# Thư mục .next/static chứa JS/CSS client-side (bắt buộc phải copy riêng)
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Chuyển sang user non-root
+# Chuyển sang user thường
 USER nextjs
 
-# Expose port 3000
+# Expose cổng
 EXPOSE 3000
-
 ENV PORT 3000
 ENV HOSTNAME "0.0.0.0"
 
-# Lệnh chạy server
+# Healthcheck: Kiểm tra app có sống không mỗi 30s
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
+
 CMD ["node", "server.js"]

@@ -18,9 +18,9 @@ export type PresenceState = {
 
   // Trạng thái động
   online_at: string;
-  active_bot_id?: string | null; // Đang làm việc trên Bot nào?
-  viewing_thread_id?: string | null; // Đang xem hội thoại nào?
-  is_typing?: boolean; // Đang gõ phím?
+  active_bot_id?: string | null;
+  viewing_thread_id?: string | null;
+  is_typing?: boolean;
 };
 
 type UsePresenceProps = {
@@ -58,35 +58,23 @@ export function usePresence({
   useEffect(() => {
     if (!staffId) return;
 
-    console.log("[Presence] Initializing channel for:", username);
-
-    // Kênh 'global_presence' dùng chung cho toàn bộ hệ thống
+    // Dùng trực tiếp biến supabase đã import
     const channel = supabase.channel("global_presence", {
       config: {
         presence: {
-          key: staffId, // Khóa định danh unique cho user này trong channel
+          key: staffId,
         },
       },
     });
 
     channel
       .on("presence", { event: "sync" }, () => {
-        // Lấy danh sách state của tất cả user khác
         const newState = channel.presenceState<PresenceState>();
-
-        // Flatten object state (vì Supabase trả về dạng { id: [state, state...] })
-        // Mỗi user chỉ có 1 state mới nhất, nên ta lấy phần tử [0]
         const peerList = Object.values(newState)
           .map((states) => states[0])
-          .filter((p) => p.staff_id !== staffId); // Loại bỏ bản thân mình khỏi danh sách peers
+          .filter((p) => p.staff_id !== staffId);
 
         setPeers(peerList);
-      })
-      .on("presence", { event: "join" }, ({ key, newPresences }) => {
-        console.log("[Presence] User joined:", key, newPresences);
-      })
-      .on("presence", { event: "leave" }, ({ key, leftPresences }) => {
-        console.log("[Presence] User left:", key, leftPresences);
       })
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
@@ -98,11 +86,10 @@ export function usePresence({
     channelRef.current = channel;
 
     return () => {
-      console.log("[Presence] Disconnecting...");
       channel.unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [staffId]); // Chỉ chạy lại khi staffId thay đổi (login/logout)
+  }, [staffId]);
 
   // 2. Hàm cập nhật trạng thái (để UI gọi)
   const updateStatus = async (patch: Partial<PresenceState>) => {
@@ -123,8 +110,8 @@ export function usePresence({
   };
 
   return {
-    peers, // Danh sách đồng nghiệp đang online
-    myState, // Trạng thái hiện tại của mình
-    updateStatus, // Hàm cập nhật trạng thái
+    peers,
+    myState,
+    updateStatus,
   };
 }
