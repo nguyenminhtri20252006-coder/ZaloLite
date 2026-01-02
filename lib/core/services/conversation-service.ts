@@ -1,221 +1,141 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/core/services/conversation-service.ts
- * [CORE SERVICE - V3.3 STABLE]
- * Logic:
- * - Fix ensureConversation to FORCE UPDATE avatar if provided.
+ * [CORE SERVICE - V6 FIXED LOGIC]
+ * - Group: Định danh bằng global_group_id.
+ * - Private: Định danh bằng mảng participant_ids (BotID + UserID).
+ * - Routing: thread_id trong conversation_members.
  */
+
 import supabase from "@/lib/supabaseServer";
 
 export class ConversationService {
-  static async findConversationByExternalId(
-    botId: string,
-    externalThreadId: string,
-  ): Promise<{ conversation_id: string; global_id: string } | null> {
-    const { data } = await supabase
-      .from("zalo_conversation_mappings")
-      .select(
-        `
-        conversation_id,
-        conversations!inner (global_id)
-      `,
-      )
-      .eq("bot_id", botId)
-      .eq("external_thread_id", externalThreadId)
-      .single();
-
-    if (data && data.conversations) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const conv = data.conversations as any;
-      return {
-        conversation_id: data.conversation_id,
-        global_id: conv.global_id,
-      };
-    }
-    return null;
-  }
-
-  static async updateConversationIdentity(
-    conversationId: string,
-    newGlobalHashId: string,
-    name?: string,
-    avatar?: string,
-    rawInfo?: unknown,
+  /**
+   * Tạo hoặc cập nhật Nhóm (Group Conversation)
+   * Logic: Dựa vào External ID (zalo_group_id) làm khóa chính
+   */
+  static async upsertGroupConversation(
+    groupId: string,
+    name: string,
+    avatar: string,
+    rawInfo: any,
   ) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const updatePayload: any = {
-        global_id: newGlobalHashId,
-        last_activity_at: new Date().toISOString(),
-      };
-
-      if (name) updatePayload.name = name;
-      // [LOGIC FIX] Luôn update avatar nếu có dữ liệu hợp lệ
-      if (avatar && avatar.length > 5) updatePayload.avatar = avatar;
-      if (rawInfo) updatePayload.raw_data = rawInfo;
-
-      const { error } = await supabase
-        .from("conversations")
-        .update(updatePayload)
-        .eq("id", conversationId);
-
-      if (error) {
-        console.warn(
-          `[ConvService] Update Identity Failed (Duplicate Hash?):`,
-          error.message,
-        );
-        // Nếu update thất bại do trùng Hash (đã có hội thoại khác dùng Hash này),
-        // Ta cố gắng update Avatar cho hội thoại Hash đó.
-        if (avatar) {
-          await supabase
-            .from("conversations")
-            .update({ avatar, name })
-            .eq("global_id", newGlobalHashId);
-        }
-      }
-    } catch (e) {
-      console.error("[ConvService] updateIdentity Error:", e);
-    }
-  }
-
-  static async ensureConversation(
-    botId: string,
-    globalHashId: string,
-    externalThreadId: string,
-    isGroup: boolean,
-    displayName: string,
-    avatar: string = "",
-    rawData: unknown = {},
-  ): Promise<string | null> {
-    try {
-      // 1. UPSERT vào bảng Core
-      const upsertPayload = {
-        global_id: globalHashId,
-        type: isGroup ? "group" : "user",
-        name: displayName,
-        avatar: avatar,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        raw_data: rawData as any,
-        last_activity_at: new Date().toISOString(),
-      };
-
-      const { data: convData, error: convError } = await supabase
-        .from("conversations")
-        .upsert(upsertPayload, { onConflict: "global_id" })
-        .select("id")
-        .single();
-
-      if (convError || !convData) {
-        // Fallback search
-        const { data: fallback } = await supabase
-          .from("conversations")
-          .select("id")
-          .eq("global_id", globalHashId)
-          .single();
-
-        if (!fallback) {
-          console.error(
-            `[ConvService] Failed to upsert conversation ${globalHashId}:`,
-            convError?.message,
-          );
-          return null;
-        }
-
-        // Nếu fallback tìm thấy, ta thử update avatar cho dòng đó (Force Update)
-        if (avatar) {
-          await supabase
-            .from("conversations")
-            .update({ avatar, name: displayName })
-            .eq("id", fallback.id);
-        }
-        return fallback.id;
-      }
-
-      const conversationUUID = convData.id;
-
-      // 2. UPSERT vào bảng Mapping
-      await supabase.from("zalo_conversation_mappings").upsert(
+    // Với Group, ta luôn có ID duy nhất từ Zalo -> Dùng làm global_group_id
+    const { data: conv, error } = await supabase
+      .from("conversations")
+      .upsert(
         {
-          bot_id: botId,
-          conversation_id: conversationUUID,
-          external_thread_id: externalThreadId,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          status: { status: "active" } as any,
+          type: "group",
+          global_group_id: groupId, // ID Nhóm Zalo
+          name: name,
+          avatar: avatar,
+          raw_data: rawInfo,
           updated_at: new Date().toISOString(),
         },
-        { onConflict: "bot_id, conversation_id" },
-      );
+        { onConflict: "global_group_id" },
+      )
+      .select("id")
+      .single();
 
-      return conversationUUID;
-    } catch (error) {
-      console.error("[ConvService] ensureConversation Exception:", error);
+    if (error) {
+      console.error(
+        `[ConvService] Upsert Group Error (${groupId}):`,
+        error.message,
+      );
       return null;
     }
+    return conv?.id;
   }
 
-  // ... (findCustomerByExternalId và ensureCustomer giữ nguyên như cũ)
-  static async findCustomerByExternalId(botId: string, externalUserId: string) {
-    const { data } = await supabase
-      .from("zalo_customer_mappings")
-      .select("customer_id")
-      .eq("bot_id", botId)
-      .eq("external_user_id", externalUserId)
-      .single();
-    return data ? data.customer_id : null;
-  }
-  static async ensureCustomer(
+  /**
+   * Tạo hoặc cập nhật Hội thoại Riêng tư (Private)
+   * Logic: Kiểm tra xem đã có hội thoại 'private' nào chứa cả 2 ID này chưa.
+   * @param botId Identity ID của Bot (Internal UUID)
+   * @param friendIdentityId Identity ID của User (Internal UUID)
+   */
+  static async upsertPrivateConversation(
     botId: string,
-    globalHashId: string,
-    externalUserId: string,
-    displayName: string,
-    avatar: string = "",
-    rawData: unknown = {},
+    friendIdentityId: string,
+    friendName: string,
+    friendAvatar: string,
   ) {
-    try {
-      const { data: custData, error: custError } = await supabase
-        .from("customers")
-        .upsert(
-          {
-            global_id: globalHashId,
-            display_name: displayName,
-            avatar: avatar, // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            raw_data: rawData as any,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "global_id" },
-        )
-        .select("id")
-        .single();
-      if (custError || !custData) {
-        const { data: fallback } = await supabase
-          .from("customers")
-          .select("id")
-          .eq("global_id", globalHashId)
-          .single();
-        if (fallback) {
-          if (avatar)
-            await supabase
-              .from("customers")
-              .update({ avatar, display_name: displayName })
-              .eq("id", fallback.id);
-          return fallback.id;
-        }
-        return null;
-      }
-      const customerUUID = custData.id;
-      await supabase.from("zalo_customer_mappings").upsert(
-        {
-          bot_id: botId,
-          customer_id: customerUUID,
-          external_user_id: externalUserId,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          status: { is_friend: false } as any,
-          last_interaction_at: new Date().toISOString(),
-        },
-        { onConflict: "bot_id, customer_id" },
+    // 1. Kiểm tra tồn tại
+    // Tìm hội thoại loại 'private' mà participant_ids chứa cả Bot và Friend
+    const participants = [botId, friendIdentityId];
+
+    const { data: existingConv, error: findError } = await supabase
+      .from("conversations")
+      .select("id")
+      .eq("type", "private")
+      .contains("participant_ids", participants) // PostgreSQL @> operator
+      .limit(1)
+      .single();
+
+    if (existingConv) {
+      // Nếu đã tồn tại -> Update Metadata (Tên, Avatar mới nhất của User)
+      // Lưu ý: Tên hội thoại private thường là tên User đối phương (theo góc nhìn Bot)
+      await supabase
+        .from("conversations")
+        .update({
+          name: friendName,
+          avatar: friendAvatar,
+          last_activity_at: new Date().toISOString(), // Bump activity
+        })
+        .eq("id", existingConv.id);
+
+      return existingConv.id;
+    }
+
+    // 2. Nếu chưa tồn tại -> Tạo mới
+    // Lưu ý: participant_ids là mảng UUID
+    const { data: newConv, error: createError } = await supabase
+      .from("conversations")
+      .insert({
+        type: "private",
+        global_group_id: null, // Private chat không có Global Group ID
+        name: friendName,
+        avatar: friendAvatar,
+        participant_ids: participants, // Lưu mảng ID để query lần sau
+        updated_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+
+    if (createError) {
+      console.error(
+        `[ConvService] Create Private Conv Error:`,
+        createError.message,
       );
-      return customerUUID;
-    } catch (error) {
       return null;
+    }
+    return newConv?.id;
+  }
+
+  /**
+   * Thêm thành viên vào hội thoại (Map Member & Routing)
+   * Hàm này cũng dùng để cập nhật lại participant_ids trong bảng conversations nếu cần
+   */
+  static async addMember(
+    conversationId: string,
+    identityId: string,
+    role: string = "member",
+    threadId: string | null = null,
+  ) {
+    // Chỉ cần insert vào bảng chi tiết
+    const { error } = await supabase.from("conversation_members").upsert(
+      {
+        conversation_id: conversationId,
+        identity_id: identityId,
+        role: role,
+        joined_at: new Date().toISOString(),
+        thread_id: threadId,
+      },
+      { onConflict: "conversation_id, identity_id" },
+    );
+
+    if (error) {
+      console.error(`[ConvService] Add Member Error:`, error.message);
     }
   }
 }

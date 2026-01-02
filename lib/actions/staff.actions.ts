@@ -2,6 +2,7 @@
  * lib/actions/staff.actions.ts
  * [SECURITY UPDATE]
  * - Các action CRUD Staff: Chỉ Admin được thực hiện.
+ * - Tích hợp Work Sessions & Audit Logs chuẩn Database V6.
  */
 
 "use server";
@@ -9,17 +10,18 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import supabase from "@/lib/supabaseServer";
-import crypto from "crypto"; // Dùng để hash token
 import {
   verifyPassword,
   createSessionToken,
   verifySessionToken,
   hashPassword,
-  hashSessionToken, // [UPDATE] Import từ security
+  hashSessionToken,
 } from "@/lib/utils/security";
-import { BotPermissionType, StaffRole } from "@/lib/types/database.types";
+// Import Role từ DB types
+// Giả sử definition role là string literal hoặc enum
+type StaffRole = "admin" | "staff";
+type BotPermissionType = "owner" | "chat" | "view_only";
 
-// ... (Giữ nguyên Session Config & Login/Logout) ...
 const COOKIE_NAME = "staff_session";
 // [UPDATE] Giảm thời gian session xuống 4 tiếng
 const SESSION_DURATION = 4 * 60 * 60 * 1000;
@@ -47,6 +49,8 @@ async function startWorkSession(staffId: string, token: string) {
 
     // Cleanup: Đóng các session treo quá lâu (VD: > 1 ngày không ping)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    // Đóng session cũ chưa có end date và last_ping cũ
     await supabase
       .from("work_sessions")
       .update({ ended_at: new Date().toISOString() })
@@ -65,6 +69,7 @@ async function startWorkSession(staffId: string, token: string) {
     console.error("Start Session Error:", e);
   }
 }
+
 async function endWorkSession(staffId: string, token?: string) {
   try {
     let query = supabase
@@ -134,6 +139,8 @@ export async function staffLoginAction(
       path: "/",
       sameSite: "lax",
     });
+
+    // [SYS] Ghi nhận Session bắt đầu
     await startWorkSession(staff.id, token);
     await createAuditLog(staff.id, "AUTH", "LOGIN", { method: "PASSWORD" });
   } catch (error: unknown) {
@@ -146,10 +153,10 @@ export async function staffLoginAction(
 export async function staffLogoutAction() {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
-  const session = await getStaffSession(); // Lấy từ cookie
+  const session = await getStaffSession();
 
   if (session && token) {
-    // [TRACKING] End Session cụ thể
+    // [SYS] Đóng Session
     await endWorkSession(session.id, token);
     await createAuditLog(session.id, "AUTH", "LOGOUT", {});
   }
@@ -169,7 +176,6 @@ export async function getStaffSession(): Promise<SessionPayload | null> {
 
 // --- SECURE CRUD ACTIONS ---
 
-// Helper Check Admin
 async function requireAdmin() {
   const session = await getStaffSession();
   if (!session || session.role !== "admin") {
@@ -179,8 +185,6 @@ async function requireAdmin() {
 }
 
 export async function getAllStaffAction() {
-  // Cho phép staff xem danh sách (để biết đồng nghiệp), nhưng không sửa được
-  // Hoặc chặn luôn nếu muốn strict
   const session = await getStaffSession();
   if (!session) throw new Error("Unauthorized");
 
@@ -193,7 +197,11 @@ export async function getAllStaffAction() {
 
   // Nếu là Staff thường, ẩn password_hash
   if (session.role !== "admin") {
-    return data.map((s) => ({ ...s, password_hash: "***" }));
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    return data.map(({ password_hash, ...rest }) => ({
+      ...rest,
+      password_hash: "***",
+    }));
   }
 
   return data;
@@ -219,12 +227,13 @@ export async function createStaffAction(payload: {
 
     const password_hash = hashPassword(password);
 
+    // [SYS] Insert Staff với Phone
     const { error } = await supabase.from("staff_accounts").insert({
       username,
       password_hash,
       full_name,
       role,
-      phone,
+      phone, // Added in Schema
       is_active: true,
     });
 
@@ -235,9 +244,7 @@ export async function createStaffAction(payload: {
     return { success: false, error: err };
   }
 }
-/**
- * Lấy danh sách quyền hạn Bot của một nhân viên
- */
+
 export async function getStaffBotPermissionsAction(staffId: string) {
   try {
     await requireAdmin();
@@ -254,9 +261,6 @@ export async function getStaffBotPermissionsAction(staffId: string) {
   }
 }
 
-/**
- * Gán quyền Bot cho nhân viên (Upsert)
- */
 export async function assignBotPermissionAction(
   staffId: string,
   botId: string,
@@ -271,7 +275,7 @@ export async function assignBotPermissionAction(
         permission_type: permissionType,
         assigned_at: new Date().toISOString(),
       },
-      { onConflict: "staff_id, bot_id, permission_type" },
+      { onConflict: "staff_id, bot_id" }, // [NOTE] Check constraint name in DB
     );
 
     if (error) throw new Error(error.message);
@@ -282,10 +286,6 @@ export async function assignBotPermissionAction(
   }
 }
 
-/**
- * Thu hồi tất cả quyền của nhân viên đối với một Bot
- * (Xóa mọi dòng liên quan đến staffId & botId trong bảng permission)
- */
 export async function revokeBotPermissionAction(
   staffId: string,
   botId: string,
@@ -365,7 +365,6 @@ export async function deleteStaffAction(id: string) {
   }
 }
 
-// ... (Logic permission và log cũ)
 export async function checkBotPermission(
   staffId: string,
   botId: string,
@@ -377,7 +376,6 @@ export async function checkBotPermission(
     .eq("id", staffId)
     .single();
 
-  // Admin có full quyền
   if (staff?.role === "admin") return true;
 
   const { data } = await supabase
@@ -389,18 +387,18 @@ export async function checkBotPermission(
 
   if (!data) return false;
 
-  // View Only: Quyền thấp nhất, ai có quyền cũng view được
+  // View Only: Quyền thấp nhất
   if (requiredType === "view_only") return true;
 
-  // Chat: Cần quyền Chat hoặc Auth (Auth > Chat)
+  // Chat: Cần quyền Chat hoặc Owner
   if (
     requiredType === "chat" &&
-    (data.permission_type === "chat" || data.permission_type === "auth")
+    (data.permission_type === "chat" || data.permission_type === "owner")
   )
     return true;
 
-  // Auth: Cần quyền Auth
-  if (requiredType === "auth" && data.permission_type === "auth") return true;
+  // Owner: Cần quyền Owner
+  if (requiredType === "owner" && data.permission_type === "owner") return true;
 
   return false;
 }
