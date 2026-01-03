@@ -1,14 +1,14 @@
 /**
  * lib/types/zalo.types.ts
  * Nguồn sự thật duy nhất (SSOT).
- * [FIX] Tách biệt Standard Types khỏi Raw Zalo Types để tránh lỗi thiếu trường (href vs url).
+ * [UPDATED V6.3] Support Normalized Content (Data Wrapper) & Media IDs.
  */
 
 import type {
   User,
   GroupInfo,
   MessageContent as ZcaMessageContent,
-  FindUserResponse as RawFindUserResponse, // Đổi tên để tránh nhầm lẫn
+  FindUserResponse as RawFindUserResponse,
   CreateGroupOptions,
   GroupInfoResponse,
   GetGroupMembersInfoResponse,
@@ -20,19 +20,16 @@ import type {
 
 // --- UI NORMALIZED TYPES ---
 
-// Dữ liệu User đã được chuẩn hóa cho Frontend sử dụng
 export interface ZaloUserResult {
-  userId: string; // Luôn có giá trị string (đã map từ uid/id)
-  displayName: string; // Tên hiển thị (đã map từ display_name/name)
+  userId: string;
+  displayName: string;
   zaloName: string;
   avatar: string;
   phoneNumber?: string;
   gender?: number;
-  // Giữ lại raw data nếu cần debug
   raw?: unknown;
 }
 
-// Re-export type gốc dưới tên alias nếu cần
 export type FindUserResponse = RawFindUserResponse;
 
 export enum Gender {
@@ -96,17 +93,15 @@ export interface ZaloUserProfile {
 }
 
 export interface ZaloPrivacySettings {
-  blockedUsers: string[]; // List UID bị chặn nhắn tin
-  blockedFeed: string[]; // List UID bị chặn xem nhật ký
+  blockedUsers: string[];
+  blockedFeed: string[];
 }
 
-// Type trả về của hàm getSettings (Cấu trúc giả định dựa trên ZCA behavior)
 export interface ZaloSettingsResponse {
   privacy?: {
     blacklist?: string[];
     blockFeed?: string[];
   };
-  // Các setting khác...
 }
 
 export interface FriendRecommendationsRecommItem {
@@ -121,7 +116,6 @@ export interface GetFriendRecommendationsResponse {
   recommItems: FriendRecommendationsRecommItem[];
 }
 
-// Thông tin lời mời đã gửi
 export interface SentFriendRequestInfo {
   userId: string;
   displayName: string;
@@ -135,7 +129,7 @@ export interface GetSentFriendRequestResponse {
   [key: string]: SentFriendRequestInfo;
 }
 
-// --- 4. CẤU TRÚC DỮ LIỆU NHÓM (Group) ---
+// --- GROUP TYPES ---
 
 export interface GroupInviteBoxParams {
   mpage?: number;
@@ -144,13 +138,11 @@ export interface GroupInviteBoxParams {
   mcount?: number;
 }
 
-// Type cho payload Review Pending (Duyệt thành viên) - Bị thiếu trước đây
 export interface ReviewPendingMemberRequestPayload {
   members: string[];
   isApprove: boolean;
 }
 
-// Type cho cập nhật cài đặt nhóm
 export interface UpdateGroupSettingsOptions {
   blockName?: boolean;
   signAdminMsg?: boolean;
@@ -174,7 +166,6 @@ export interface GetPendingGroupMembersResponse {
   status?: "SUCCESS" | "PERMISSION_DENIED" | "FEATURE_DISABLED" | "ERROR";
 }
 
-// Type cho QR Callback
 export type QRCallbackData =
   | string
   | {
@@ -183,14 +174,14 @@ export type QRCallbackData =
       };
     };
 
-// --- 1. RAW CONTENT TYPES (Dữ liệu thô từ Zalo - Dùng cho UI hiển thị tin nhắn nhận được) ---
+// --- RAW CONTENT TYPES ---
 
 export interface ZaloAttachmentContent {
   title?: string;
   description?: string;
   href: string;
   thumb?: string;
-  url?: string; // Fallback
+  url?: string;
 }
 
 export interface ZaloStickerContent {
@@ -213,7 +204,7 @@ export interface ZaloVideoContent {
   height?: number;
 }
 
-// --- 2. ACTION PARAMETER TYPES ---
+// --- ACTION PARAMETER TYPES ---
 
 export interface SendVoiceOptions {
   voiceUrl: string;
@@ -236,7 +227,7 @@ export interface SendLinkOptions {
   ttl?: number;
 }
 
-// --- 3. ENTITY TYPES ---
+// --- ENTITY TYPES ---
 
 export interface AccountInfo {
   userId: string;
@@ -262,7 +253,7 @@ export type UserCacheEntry = {
   commonGroups: Set<string>;
 };
 
-// --- 4. RAW & STANDARD MESSAGE TYPES ---
+// --- RAW MESSAGE TYPES ---
 
 export interface RawZaloMessageData {
   msgId: string;
@@ -275,6 +266,7 @@ export interface RawZaloMessageData {
   quote?: {
     ownerId: string;
     msg: string;
+    msgId?: string; // [FIX] Added msgId for Quote
     attach?: string;
     fromD: string;
   };
@@ -283,6 +275,8 @@ export interface RawZaloMessageData {
     pos: number;
     len: number;
   }>;
+  // Các trường dynamic khác
+  [key: string]: unknown;
 }
 
 export interface RawZaloMessage {
@@ -292,10 +286,9 @@ export interface RawZaloMessage {
   data: RawZaloMessageData;
 }
 
-// [FIX] RESTORE LEGACY ALIAS (Quan trọng cho ChatFrame)
 export type ZaloMessage = RawZaloMessage;
 
-// --- 7. CONSTANTS & ENUMS ---
+// --- CONSTANTS & ENUMS ---
 
 export const ZALO_EVENTS = {
   QR_GENERATED: "qr_generated",
@@ -312,11 +305,7 @@ export enum ThreadType {
 }
 
 export type LoginState = "IDLE" | "LOGGING_IN" | "LOGGED_IN" | "ERROR";
-
-// [FIX] Update ViewState để hỗ trợ CRM
 export type ViewState = "chat" | "manage" | "setting" | "crm" | "staff";
-
-// --- 6. EXPORTS & STANDARD TYPES ---
 
 export type MessageContent = ZcaMessageContent;
 
@@ -334,25 +323,26 @@ export type {
   GetGroupLinkDetailResponse,
 };
 
-// [FIX] STANDARD TYPES (Dữ liệu chuẩn hóa nội bộ - Dùng cho Pipeline & Sender Service)
-// Đã ngắt kế thừa từ Raw Types để tránh lỗi 'missing href'
+// =============================================================================
+// [FIX] STANDARD TYPES & NORMALIZED CONTENT (Blueprint V6.3 Compliant)
+// =============================================================================
 
 export interface StandardSticker {
-  id: number;
+  stickerId: number; // [FIX] Renamed from id to stickerId
   cateId: number;
   type: number;
-  url?: string;
+  stickerUrl?: string; // [FIX] Renamed/Added for UI display
 }
 
 export interface StandardPhoto {
   url: string;
   thumbnail: string;
-  // [FIX] Thêm các trường này để khớp với logic parser
   width: number;
   height: number;
   title?: string;
   description?: string;
   size?: number;
+  photoId?: string; // [FIX] Added photoId for forwarding
 }
 
 export interface StandardVideo {
@@ -361,6 +351,7 @@ export interface StandardVideo {
   duration?: number;
   width?: number;
   height?: number;
+  fileId?: string; // [FIX] Added fileId for forwarding
 }
 
 export interface StandardVoice {
@@ -375,15 +366,25 @@ export interface StandardLink {
   thumbnail?: string;
 }
 
-// Normalized Content Union
+export interface StandardFile {
+  url: string;
+  fileId: string;
+  title: string;
+  size: number;
+  checksum?: string;
+}
+
+// [FIX] Normalized Content Wrapper
+// Mọi type đều bọc trong object `data` để nhất quán
 export type NormalizedContent =
-  | { type: "text"; text: string; mentions?: unknown[] }
+  | { type: "text"; data: { text: string; mentions?: unknown[] } }
   | { type: "sticker"; data: StandardSticker }
-  | { type: "photo"; data: StandardPhoto }
+  | { type: "image"; data: StandardPhoto } // [FIX] Standardized to 'image' (was photo)
   | { type: "video"; data: StandardVideo }
   | { type: "voice"; data: StandardVoice }
   | { type: "link"; data: StandardLink }
-  | { type: "unknown"; raw: unknown };
+  | { type: "file"; data: StandardFile }
+  | { type: "unknown"; data: { text?: string; raw?: unknown } };
 
 export interface StandardMessage {
   msgId: string;
@@ -401,6 +402,7 @@ export interface StandardMessage {
   quote?: {
     text: string;
     senderId: string;
+    relatedMsgId: string; // [FIX] Added relatedMsgId
     attach?: string;
   };
 }

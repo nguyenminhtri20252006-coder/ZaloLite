@@ -1,59 +1,106 @@
-/**
- * lib/actions/chat.actions.ts
- * [SERVER ACTIONS - V3.7 FIX]
- * - Added 'beforeTimeStamp' for pagination.
- * - [CRITICAL FIX] Filter messages: Show Customer OR Current Bot only. Hide other Bots.
- */
-
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use server";
 
-import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
-import { ThreadInfo, ThreadType } from "@/lib/types/zalo.types";
 import supabase from "@/lib/supabaseServer";
 import { SenderService } from "@/lib/core/services/sender-service";
+import {
+  NormalizedContent,
+  ThreadInfo,
+  ThreadType,
+} from "@/lib/types/zalo.types";
+import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
 import { checkBotPermission } from "@/lib/actions/staff.actions";
 
-function getBotAPI(botId: string) {
+// [NEW] ACTION: UPLOAD MEDIA
+/**
+ * Upload file từ Client lên Zalo (qua Server Bot).
+ * Trả về Metadata để Client gọi tiếp hàm Send.
+ */
+export async function uploadMediaAction(botId: string, formData: FormData) {
   try {
-    return BotRuntimeManager.getInstance().getBotAPI(botId);
-  } catch (e: unknown) {
-    const err = e instanceof Error ? e.message : String(e);
-    throw new Error(`Lỗi Bot (${botId}): ${err}`);
+    const file = formData.get("file") as File;
+    // Client gửi type: 'image' | 'video' | 'audio' | 'file'
+    const type = formData.get("type") as "image" | "video" | "audio" | "file";
+
+    if (!file || !type) throw new Error("Missing file or type");
+
+    // 1. Convert File -> Buffer
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // 2. Init Sender
+    const api = BotRuntimeManager.getInstance().getBotAPI(botId);
+    if (!api) throw new Error("Bot offline");
+
+    const sender = SenderService.getInstance();
+    sender.setApi(api, botId);
+
+    // 3. Upload lên Zalo
+    // [LOGIC] Với type='audio', ZCA-JS yêu cầu đúng string 'audio'
+    // Hàm sender.uploadMedia sẽ xử lý gọi API uploadAttachment
+    const uploadRes = await sender.uploadMedia(type, buffer);
+
+    // Trả về kết quả thô từ Zalo (Client sẽ dùng nó để construct payload gửi)
+    return { success: true, data: uploadRes };
+  } catch (error: any) {
+    console.error("Upload Error:", error);
+    return { success: false, error: error.message };
   }
 }
-
+/**
+ * Lấy danh sách hội thoại từ DB (Thay thế getThreadsFromDBAction cũ)
+ * Logic V6: Query bảng conversation_members -> Join conversations
+ */
 export async function getThreadsFromDBAction(
   botId: string,
 ): Promise<ThreadInfo[]> {
   if (!botId) return [];
 
   try {
-    const { data: mappings, error: mapError } = await supabase
-      .from("zalo_conversation_mappings")
-      .select("conversation_id")
-      .eq("bot_id", botId);
+    // 1. Lấy tất cả hội thoại mà Bot đang tham gia từ conversation_members
+    // Cần lấy thread_id (Routing Key) để UI hiển thị đúng ID tương tác
+    const { data: members, error: memberError } = await supabase
+      .from("conversation_members")
+      .select("conversation_id, thread_id")
+      .eq("identity_id", botId);
 
-    if (mapError) throw new Error(mapError.message);
-    if (!mappings || mappings.length === 0) return [];
+    if (memberError) throw new Error(memberError.message);
+    if (!members || members.length === 0) return [];
 
-    const conversationIds = mappings.map((m) => m.conversation_id);
+    const convIds = members.map((m) => m.conversation_id);
+    const threadMap = new Map(
+      members.map((m) => [m.conversation_id, m.thread_id]),
+    );
 
+    // 2. Lấy thông tin chi tiết hội thoại
     const { data: conversations, error: convError } = await supabase
       .from("conversations")
       .select("*")
-      .in("id", conversationIds)
+      .in("id", convIds)
       .order("last_activity_at", { ascending: false });
 
     if (convError) throw new Error(convError.message);
 
-    return conversations.map((conv) => ({
-      id: conv.global_id,
-      uuid: conv.id,
-      name: conv.name || `Hội thoại ${conv.global_id}`,
-      avatar: conv.avatar || "",
-      type: conv.type === "group" ? 1 : 0,
-      lastActivity: conv.last_activity_at,
-    }));
+    // 3. Map về ThreadInfo cho UI
+    return conversations.map((conv) => {
+      // Logic ID hiển thị:
+      // - Nếu Group: Dùng global_group_id (System ID)
+      // - Nếu Private: Dùng thread_id riêng của Bot (để Bot biết reply cho ai)
+      // Fallback: Dùng thread_id trong mapping
+      const displayId =
+        conv.type === "group"
+          ? conv.global_group_id || threadMap.get(conv.id)
+          : threadMap.get(conv.id);
+
+      return {
+        id: displayId || conv.id,
+        uuid: conv.id,
+        name: conv.name || `Hội thoại ${displayId}`,
+        avatar: conv.avatar || "",
+        type: conv.type === "group" ? 1 : 0,
+        lastActivity: conv.last_activity_at,
+      };
+    });
   } catch (error: unknown) {
     console.error("[ChatAction] getThreadsFromDB Error:", error);
     return [];
@@ -62,48 +109,61 @@ export async function getThreadsFromDBAction(
 
 /**
  * Lấy lịch sử tin nhắn (Hỗ trợ Pagination & Isolation)
+ * [CRITICAL] Logic Filter: Chỉ hiện tin của Customer HOẶC tin do chính Bot này/Staff gửi qua Bot này.
  */
 export async function getMessagesAction(
   botId: string,
-  threadId: string,
+  threadId: string, // Có thể là global_group_id hoặc external thread_id
   beforeTimeStamp?: string,
+  limit = 20,
 ) {
-  const { data: conv } = await supabase
+  // 1. Resolve Conversation UUID
+  // Tìm trong conversations (nếu threadId là global_id) HOẶC conversation_members (nếu là local thread_id)
+  let conversationId: string | null = null;
+
+  // Thử tìm theo Global Group ID trước
+  const { data: convByGlobal } = await supabase
     .from("conversations")
     .select("id")
-    .eq("global_id", threadId)
+    .eq("global_group_id", threadId)
     .single();
 
-  if (!conv) return [];
+  if (convByGlobal) {
+    conversationId = convByGlobal.id;
+  } else {
+    // Nếu không, tìm trong members của Bot này (Private chat thường dùng case này)
+    const { data: member } = await supabase
+      .from("conversation_members")
+      .select("conversation_id")
+      .eq("identity_id", botId)
+      .eq("thread_id", threadId)
+      .single();
+    if (member) conversationId = member.conversation_id;
+  }
 
-  // 2. Query Messages
+  if (!conversationId) return [];
+
+  // 2. Query Messages (Kèm Filter Isolation)
   let query = supabase
     .from("messages")
     .select(
       `
       *,
       staff_accounts:staff_id (full_name, avatar),
-      zalo_bots:bot_send_id (name, avatar),
-      customers:customer_send_id (display_name, avatar)
+      sender_identity:zalo_identities!sender_id (id, name, display_name, avatar, type)
     `,
     )
-    .eq("conversation_id", conv.id)
+    .eq("conversation_id", conversationId)
     .order("sent_at", { ascending: false })
-    .limit(20);
+    .limit(limit);
 
   // [LOGIC ISOLATION]
-  // Chỉ lấy tin nhắn: (Là của Customer) HOẶC (Là của Bot này gửi)
-  // Logic này giúp ẩn tin nhắn của Bot B khi đang xem ở giao diện Bot A
-  // Cú pháp 'or' của Supabase: sender_type.eq.customer,bot_send_id.eq.{botId}
-  // Tuy nhiên, do cấu trúc OR phức tạp với các điều kiện khác, ta dùng bộ lọc cơ bản rồi filter ở code JS
-  // hoặc dùng cú pháp .or(`sender_type.eq.customer,bot_send_id.eq.${botId}`)
-
-  // Áp dụng filter context:
-  query = query.or(
-    `sender_type.eq.customer,bot_send_id.eq.${botId},sender_type.eq.staff`,
-  );
-  // Lưu ý: sender_type=staff thường đi kèm bot_send_id. Nếu staff gửi qua bot khác thì cũng nên ẩn.
-  // Nhưng để an toàn ta cứ lấy về rồi filter ở dưới nếu query OR phức tạp.
+  // Ẩn tin nhắn của Bot khác trong cùng nhóm.
+  // Hiện tin nếu:
+  // 1. sender_type = 'customer'
+  // 2. HOẶC (sender_type = 'bot' VÀ sender_id = botId)
+  // 3. HOẶC (sender_type = 'staff' VÀ bot_send_id = botId)
+  // Lưu ý: Do cú pháp OR của Supabase phức tạp khi join, ta filter ở code JS cho an toàn và linh hoạt.
 
   if (beforeTimeStamp) {
     query = query.lt("sent_at", beforeTimeStamp);
@@ -116,153 +176,140 @@ export async function getMessagesAction(
     return [];
   }
 
-  // [CLIENT-SIDE FILTERING - DOUBLE CHECK]
-  // Đảm bảo tuyệt đối không lộ tin nhắn của bot khác
+  // [CLIENT-SIDE FILTERING]
   const filteredMessages = messages.filter((msg) => {
-    if (msg.sender_type === "bot" || msg.sender_type === "staff") {
-      // Chỉ hiện nếu bot_send_id trùng với bot hiện tại
-      // Hoặc nếu bot_send_id null (tin hệ thống chung)
-      return msg.bot_send_id === botId || !msg.bot_send_id;
+    // Luôn hiện tin khách hàng
+    if (msg.sender_type === "customer") return true;
+
+    // Nếu là Bot hoặc Staff gửi -> Phải liên quan đến Bot hiện tại
+    // msg.sender_id là ID của Bot gửi (nếu type=bot)
+    // msg.bot_send_id là ID Bot được Staff dùng để gửi
+    if (msg.sender_type === "bot") {
+      return msg.sender_id === botId;
     }
-    return true; // Customer & Other luôn hiện
+    if (msg.sender_type === "staff") {
+      return msg.bot_send_id === botId;
+    }
+    return true;
   });
 
   const sortedMessages = filteredMessages.reverse();
 
-  return (
-    sortedMessages.map((msg) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const contentObj = msg.content as Record<string, unknown>;
-      const msgTypeRaw = msg.msg_type || "text";
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rawData = (msg.raw_content as any)?.data || {};
+  // Map về cấu trúc UI cũ để ChatFrame hoạt động
+  return sortedMessages.map((msg) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const contentData = (msg.content as any)?.data || {};
+    const contentType = (msg.content as any)?.type || "text";
 
-      const extendedInfo = {
-        senderType: msg.sender_type,
-        botSendId: msg.bot_send_id,
-        staffInfo: msg.staff_accounts
+    // Normalize Identity Info
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const senderInfo = (msg.sender_identity as any) || {};
+
+    const extendedInfo = {
+      senderType: msg.sender_type,
+      botSendId: msg.bot_send_id,
+      staffInfo: msg.staff_accounts
+        ? {
+            name: msg.staff_accounts.full_name,
+            avatar: msg.staff_accounts.avatar,
+          }
+        : null,
+      botInfo:
+        msg.sender_type === "bot"
+          ? { name: senderInfo.name || "Bot", avatar: senderInfo.avatar }
+          : null,
+      customerInfo:
+        msg.sender_type === "customer"
           ? {
-              name: msg.staff_accounts.full_name,
-              avatar: msg.staff_accounts.avatar,
+              name: senderInfo.display_name || senderInfo.name,
+              avatar: senderInfo.avatar,
             }
           : null,
-        botInfo: msg.zalo_bots
-          ? { name: msg.zalo_bots.name, avatar: msg.zalo_bots.avatar }
-          : null,
-        customerInfo: msg.customers
-          ? { name: msg.customers.display_name, avatar: msg.customers.avatar }
-          : null,
-      };
+    };
 
-      return {
-        type: 0,
-        threadId: threadId,
-        isSelf: false,
-        data: {
-          msgId: msg.zalo_msg_id,
-          cliMsgId: msg.zalo_msg_id,
-          content: contentObj,
-          ts: new Date(msg.sent_at).getTime().toString(),
-          uidFrom:
-            msg.sender_type === "customer"
-              ? msg.customer_send_id || msg.sender_id
-              : msg.bot_send_id || msg.sender_id,
+    return {
+      type: 0,
+      threadId: threadId, // ID ngữ cảnh hiện tại
+      isSelf: msg.is_self,
+      data: {
+        msgId: msg.zalo_msg_id,
+        cliMsgId: msg.zalo_msg_id,
+        // Map content về cấu trúc Legacy UI (nếu cần) hoặc dùng structure mới
+        content: contentData,
+        ts: new Date(msg.sent_at).getTime().toString(),
+        uidFrom: msg.sender_id, // UUID internal
 
-          dName: rawData.dName || "",
-          msgType: msgTypeRaw === "text" ? "webchat" : `chat.${msgTypeRaw}`,
-          ...extendedInfo,
-        },
-      };
-    }) || []
-  );
+        dName: senderInfo.display_name || senderInfo.name || "Unknown",
+        msgType: contentType === "text" ? "webchat" : `chat.${contentType}`,
+
+        // Metadata cho UI Render
+        ...extendedInfo,
+      },
+    };
+  });
 }
 
+/**
+ * Gửi tin nhắn từ Dashboard (Staff)
+ * [V6] Sử dụng SenderService và NormalizedContent
+ */
 export async function sendMessageAction(
   staffId: string,
   botId: string,
-  content: string,
+  content: NormalizedContent, // Updated to use NormalizedContent
   threadId: string,
-  type: ThreadType,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  type: ThreadType, // Legacy parameter, kept for compatibility but logic relies on DB
 ) {
   try {
+    // 1. Check Permission
     const hasPermission = await checkBotPermission(staffId, botId, "chat");
     if (!hasPermission) {
       throw new Error("Bạn không có quyền gửi tin nhắn trên Bot này.");
     }
 
-    console.log(`[ChatAction] Request Send: ${content} -> ${threadId} (Hash)`);
-
-    const { data: conv } = await supabase
-      .from("conversations")
-      .select("id")
-      .eq("global_id", threadId)
+    // 2. Resolve Conversation UUID from threadId & botId
+    // Tìm hội thoại mà Bot đang tham gia với routing key là threadId
+    const { data: member } = await supabase
+      .from("conversation_members")
+      .select("conversation_id")
+      .eq("identity_id", botId)
+      .eq("thread_id", threadId)
       .single();
 
-    if (!conv) throw new Error(`Không tìm thấy hội thoại (Hash: ${threadId}).`);
+    // Fallback: Nếu threadId là global_id của nhóm
+    let conversationId = member?.conversation_id;
+    if (!conversationId) {
+      const { data: conv } = await supabase
+        .from("conversations")
+        .select("id")
+        .eq("global_group_id", threadId)
+        .single();
+      if (conv) conversationId = conv.id;
+    }
 
-    const { data: mapping } = await supabase
-      .from("zalo_conversation_mappings")
-      .select("external_thread_id")
-      .eq("conversation_id", conv.id)
-      .eq("bot_id", botId)
-      .single();
+    if (!conversationId) {
+      throw new Error(
+        `Không tìm thấy hội thoại (ThreadID: ${threadId}). Vui lòng F5 hoặc sync lại.`,
+      );
+    }
 
-    if (!mapping || !mapping.external_thread_id)
-      throw new Error(`Bot chưa map với hội thoại.`);
-
-    const numericThreadId = mapping.external_thread_id;
-
+    // 3. Init Sender Service
     const api = BotRuntimeManager.getInstance().getBotAPI(botId);
+    if (!api) throw new Error("Bot is offline.");
+
     const sender = SenderService.getInstance();
-    sender.setApi(api);
+    sender.setApi(api, botId);
 
-    const zaloRes = await sender.sendText(
-      content,
-      numericThreadId,
-      type === ThreadType.Group,
-    );
-    const actualMsgId = zaloRes?.message?.msgId || `local_${Date.now()}`;
+    // 4. Send & Self-Sync
+    // SenderService sẽ tự động: Upload Media (nếu cần logic mở rộng) -> Send API -> Insert DB
+    // Lưu ý: StaffId được truyền vào để audit log
+    const result = await sender.sendMessage(conversationId, content, staffId);
 
-    const { error: insertError } = await supabase.from("messages").insert({
-      conversation_id: conv.id,
-      zalo_msg_id: actualMsgId,
-      sender_type: "staff",
-      staff_id: staffId,
-      bot_send_id: botId,
-      customer_send_id: null,
-      content: { type: "text", text: content },
-      raw_content: { data: zaloRes || {} },
-      msg_type: "text",
-      sent_at: new Date().toISOString(),
-    });
-
-    if (insertError) console.error("DB Insert Error:", insertError);
-
-    await supabase
-      .from("conversations")
-      .update({ last_activity_at: new Date().toISOString() })
-      .eq("id", conv.id);
-
-    return { success: true };
+    return { success: true, data: result };
   } catch (error: unknown) {
     const err = error instanceof Error ? error.message : String(error);
     console.error("[ChatAction] Send Error:", err);
     return { success: false, error: err };
   }
-}
-
-export async function sendStickerAction(
-  botId: string,
-  stickerId: number,
-  cateId: number,
-  threadId: string,
-  type: ThreadType,
-) {
-  return { success: false, error: "Not implemented yet" };
-}
-export async function setEchoBotStateAction(isEnabled: boolean) {
-  console.log("Echo:", isEnabled);
-}
-export async function getThreadsAction(botId: string) {
-  return [];
 }
