@@ -1,7 +1,12 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/utils/text-renderer.ts
  * [CLEANUP] Removed debug logs.
  */
+
+import { NormalizedContent } from "@/lib/types/zalo.types";
+
+// --- 1. ZALO STYLED TEXT LOGIC (EXISTING) ---
 
 // Định nghĩa kiểu Style từ Zalo
 export interface ZaloStyle {
@@ -86,4 +91,70 @@ export function processStyledText(
   }
 
   return segments;
+}
+
+// --- 2. SNIPPET RENDERING (NEW FOR SIDEBAR) ---
+
+export function renderSnippet(
+  content: NormalizedContent | null | undefined,
+): string {
+  if (!content || !content.type) return "";
+
+  switch (content.type) {
+    case "text":
+      return (content.data as any).text || "";
+
+    case "image":
+      return "📷 [Hình ảnh]";
+
+    case "sticker":
+      return "😊 [Nhãn dán]";
+
+    case "voice":
+      return "🎤 [Tin nhắn thoại]";
+
+    case "video":
+      return "🎥 [Video]";
+
+    case "file":
+      return `📁 [File] ${
+        (content.data as any).name || (content.data as any).title || ""
+      }`;
+
+    case "link":
+      return "🔗 [Liên kết]";
+
+    case "location":
+      return "📍 [Vị trí]";
+
+    default:
+      return "Tin nhắn mới";
+  }
+}
+
+// --- 3. TIME FORMATTING (NEW UTILITY) ---
+
+export function formatTime(isoString: string | undefined): string {
+  if (!isoString) return "";
+  const date = new Date(isoString);
+  const now = new Date();
+
+  const isToday = date.toDateString() === now.toDateString();
+  const isYesterday =
+    new Date(now.setDate(now.getDate() - 1)).toDateString() ===
+    date.toDateString();
+
+  if (isToday) {
+    return date.toLocaleTimeString("vi-VN", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } else if (isYesterday) {
+    return "Hôm qua";
+  } else {
+    return date.toLocaleDateString("vi-VN", {
+      day: "2-digit",
+      month: "2-digit",
+    });
+  }
 }

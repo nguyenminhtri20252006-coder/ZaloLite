@@ -242,6 +242,9 @@ export interface ThreadInfo {
   avatar: string;
   type: 0 | 1;
   lastActivity?: string;
+  // [MERGED] Added for ConversationList UI
+  lastMessage?: NormalizedContent;
+  unreadCount?: number;
 }
 
 export type UserCacheEntry = {
@@ -332,6 +335,7 @@ export interface StandardSticker {
   cateId: number;
   type: number;
   stickerUrl?: string; // [FIX] Renamed/Added for UI display
+  url?: string; // [MERGED] Added alias for ChatFrame UI compatibility
 }
 
 export interface StandardPhoto {
@@ -343,6 +347,7 @@ export interface StandardPhoto {
   description?: string;
   size?: number;
   photoId?: string; // [FIX] Added photoId for forwarding
+  caption?: string; // [MERGED] Added for UI display
 }
 
 export interface StandardVideo {
@@ -352,6 +357,7 @@ export interface StandardVideo {
   width?: number;
   height?: number;
   fileId?: string; // [FIX] Added fileId for forwarding
+  caption?: string; // [MERGED] Added for UI display
 }
 
 export interface StandardVoice {
@@ -372,10 +378,17 @@ export interface StandardFile {
   title: string;
   size: number;
   checksum?: string;
+  name?: string; // [MERGED] Alias for title
 }
 
-// [FIX] Normalized Content Wrapper
-// Mọi type đều bọc trong object `data` để nhất quán
+// [FIX] Added StandardLocation definition
+export interface StandardLocation {
+  lat: number;
+  long: number;
+  address?: string;
+}
+
+// [FIX] Normalized Content Wrapper (Added 'location')
 export type NormalizedContent =
   | { type: "text"; data: { text: string; mentions?: unknown[] } }
   | { type: "sticker"; data: StandardSticker }
@@ -384,6 +397,7 @@ export type NormalizedContent =
   | { type: "voice"; data: StandardVoice }
   | { type: "link"; data: StandardLink }
   | { type: "file"; data: StandardFile }
+  | { type: "location"; data: StandardLocation } // [FIX] Added location type
   | { type: "unknown"; data: { text?: string; raw?: unknown } };
 
 export interface StandardMessage {

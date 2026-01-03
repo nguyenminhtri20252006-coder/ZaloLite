@@ -343,3 +343,78 @@ export const IconRobot = ({ className }: { className: string }) => (
     <path d="M12 9a.75.75 0 01.75-.75h.008a.75.75 0 01.75.75v.008a.75.75 0 01-.75.75H12.75a.75.75 0 01-.75-.75V9z" />
   </svg>
 );
+
+// --- [NEW] MISSING ICONS ---
+
+export const IconMicrophone = ({ className }: { className?: string }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+  >
+    <path d="M8.25 4.5a3.75 3.75 0 117.5 0v8.25a3.75 3.75 0 11-7.5 0V4.5z" />
+    <path d="M6 10.5a.75.75 0 01.75.75v1.5a5.25 5.25 0 1010.5 0v-1.5a.75.75 0 011.5 0v1.5a6.751 6.751 0 01-6 6.709v2.291h3a.75.75 0 010 1.5h-7.5a.75.75 0 010-1.5h3v-2.291a6.751 6.751 0 01-6-6.709v-1.5A.75.75 0 016 10.5z" />
+  </svg>
+);
+
+export const IconPaperclip = ({ className }: { className?: string }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+  >
+    <path
+      fillRule="evenodd"
+      d="M18.97 3.659a2.25 2.25 0 00-3.182 0l-10.94 10.94a3.75 3.75 0 105.304 5.303l7.693-7.693a.75.75 0 011.06 1.06l-7.693 7.693a5.25 5.25 0 11-7.424-7.424l10.939-10.94a3.75 3.75 0 115.303 5.304L9.097 18.835l-.008.008-.007.007-.002.002-.003.002A2.25 2.25 0 015.91 15.66l7.81-7.81a.75.75 0 011.061 1.06l-7.81 7.81a.75.75 0 001.054 1.068L18.97 6.84a2.25 2.25 0 000-3.182z"
+      clipRule="evenodd"
+    />
+  </svg>
+);
+
+export const IconLoader = ({ className }: { className?: string }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    fill="none"
+    viewBox="0 0 24 24"
+    strokeWidth={1.5}
+    stroke="currentColor"
+    className={className}
+  >
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
+    />
+  </svg>
+);
+
+// --- AGGREGATED EXPORT FOR UI ---
+// Giúp sử dụng kiểu <Icons.Microphone />
+export const Icons = {
+  QrCode: IconQrCode,
+  Key: IconKey,
+  User: IconUser,
+  Users: IconUsers,
+  Info: IconInfo,
+  Send: IconSend,
+  Search: IconSearch,
+  Logout: IconLogout,
+  Close: IconClose,
+  Refresh: IconRefresh,
+  MenuToggle: IconMenuToggle,
+  ChatBubble: IconChatBubble,
+  Cog: IconCog,
+  UserPlus: IconUserPlus,
+  UserMinus: IconUserMinus,
+  Check: IconCheck,
+  Link: IconLink,
+  Clock: IconClock,
+  BookOpen: IconBookOpen,
+  Phone: IconPhone,
+  Robot: IconRobot,
+  Microphone: IconMicrophone,
+  Paperclip: IconPaperclip,
+  Loader: IconLoader,
+};

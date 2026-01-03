@@ -99,6 +99,9 @@ export async function getThreadsFromDBAction(
         avatar: conv.avatar || "",
         type: conv.type === "group" ? 1 : 0,
         lastActivity: conv.last_activity_at,
+        // [NEW] Map snippet từ cột last_message (JSONB)
+        lastMessage: conv.last_message as NormalizedContent,
+        unreadCount: 0, // TODO: Implement unread count logic later
       };
     });
   } catch (error: unknown) {
@@ -113,7 +116,7 @@ export async function getThreadsFromDBAction(
  */
 export async function getMessagesAction(
   botId: string,
-  threadId: string, // Có thể là global_group_id hoặc external thread_id
+  threadId: string,
   beforeTimeStamp?: string,
   limit = 20,
 ) {
@@ -157,14 +160,6 @@ export async function getMessagesAction(
     .order("sent_at", { ascending: false })
     .limit(limit);
 
-  // [LOGIC ISOLATION]
-  // Ẩn tin nhắn của Bot khác trong cùng nhóm.
-  // Hiện tin nếu:
-  // 1. sender_type = 'customer'
-  // 2. HOẶC (sender_type = 'bot' VÀ sender_id = botId)
-  // 3. HOẶC (sender_type = 'staff' VÀ bot_send_id = botId)
-  // Lưu ý: Do cú pháp OR của Supabase phức tạp khi join, ta filter ở code JS cho an toàn và linh hoạt.
-
   if (beforeTimeStamp) {
     query = query.lt("sent_at", beforeTimeStamp);
   }
@@ -180,10 +175,6 @@ export async function getMessagesAction(
   const filteredMessages = messages.filter((msg) => {
     // Luôn hiện tin khách hàng
     if (msg.sender_type === "customer") return true;
-
-    // Nếu là Bot hoặc Staff gửi -> Phải liên quan đến Bot hiện tại
-    // msg.sender_id là ID của Bot gửi (nếu type=bot)
-    // msg.bot_send_id là ID Bot được Staff dùng để gửi
     if (msg.sender_type === "bot") {
       return msg.sender_id === botId;
     }
@@ -193,60 +184,9 @@ export async function getMessagesAction(
     return true;
   });
 
-  const sortedMessages = filteredMessages.reverse();
-
-  // Map về cấu trúc UI cũ để ChatFrame hoạt động
-  return sortedMessages.map((msg) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const contentData = (msg.content as any)?.data || {};
-    const contentType = (msg.content as any)?.type || "text";
-
-    // Normalize Identity Info
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const senderInfo = (msg.sender_identity as any) || {};
-
-    const extendedInfo = {
-      senderType: msg.sender_type,
-      botSendId: msg.bot_send_id,
-      staffInfo: msg.staff_accounts
-        ? {
-            name: msg.staff_accounts.full_name,
-            avatar: msg.staff_accounts.avatar,
-          }
-        : null,
-      botInfo:
-        msg.sender_type === "bot"
-          ? { name: senderInfo.name || "Bot", avatar: senderInfo.avatar }
-          : null,
-      customerInfo:
-        msg.sender_type === "customer"
-          ? {
-              name: senderInfo.display_name || senderInfo.name,
-              avatar: senderInfo.avatar,
-            }
-          : null,
-    };
-
-    return {
-      type: 0,
-      threadId: threadId, // ID ngữ cảnh hiện tại
-      isSelf: msg.is_self,
-      data: {
-        msgId: msg.zalo_msg_id,
-        cliMsgId: msg.zalo_msg_id,
-        // Map content về cấu trúc Legacy UI (nếu cần) hoặc dùng structure mới
-        content: contentData,
-        ts: new Date(msg.sent_at).getTime().toString(),
-        uidFrom: msg.sender_id, // UUID internal
-
-        dName: senderInfo.display_name || senderInfo.name || "Unknown",
-        msgType: contentType === "text" ? "webchat" : `chat.${contentType}`,
-
-        // Metadata cho UI Render
-        ...extendedInfo,
-      },
-    };
-  });
+  // [IMPORTANT] Trả về Raw Data đảo ngược (cũ nhất -> mới nhất) để UI dễ render danh sách
+  // Frontend sẽ tự xử lý việc hiển thị UI
+  return filteredMessages.reverse();
 }
 
 /**

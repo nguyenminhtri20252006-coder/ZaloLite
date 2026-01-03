@@ -3,7 +3,8 @@
  * [UPDATE] Handle 401 Unauthorized -> Force Logout.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { getStaffSession } from "@/lib/actions/staff.actions";
 
 const PING_INTERVAL = 5 * 60 * 1000; // 5 phút
 
@@ -37,4 +38,35 @@ export function useWorkSession() {
     // Cleanup
     return () => clearInterval(intervalId);
   }, []);
+}
+
+// [NEW] Hook để lấy thông tin Staff hiện tại
+export function useStaffAuth() {
+  const [staff, setStaff] = useState<{
+    id: string;
+    role: string;
+    username: string;
+    full_name: string;
+    avatar?: string | null;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchSession = async () => {
+      try {
+        const session = await getStaffSession();
+        if (session) {
+          setStaff(session);
+        }
+      } catch (error) {
+        console.error("Failed to fetch staff session:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchSession();
+  }, []);
+
+  return { staff, loading };
 }

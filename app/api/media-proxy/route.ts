@@ -1,70 +1,49 @@
 import { NextRequest, NextResponse } from "next/server";
-import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
-import axios from "axios";
 
+/**
+ * API Proxy để bypass lỗi 403 Forbidden của Zalo CDN (hoặc Audio).
+ * Usage: /api/media-proxy?url=ENCODED_URL
+ */
 export async function GET(req: NextRequest) {
   const url = req.nextUrl.searchParams.get("url");
-  const botId = req.nextUrl.searchParams.get("botId");
 
-  if (!url || !botId) {
-    return new NextResponse("Missing url or botId", { status: 400 });
+  if (!url) {
+    return new NextResponse("Missing URL param", { status: 400 });
   }
-
-  // 1. Lấy Context của Bot để có Cookie
-  const api = BotRuntimeManager.getInstance().getBotAPI(botId);
-  if (!api) {
-    return new NextResponse("Bot offline", { status: 503 });
-  }
-
-  // 2. Lấy Cookie & UserAgent
-  // [FIX] Cast api to any to access internal request object
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const apiInternal = api as any;
-  // Giả định library structure: api.request.cookieJar.getCookieString(url)
-  const cookie = apiInternal.request?.cookieJar?.getCookieString(url) || "";
-  const userAgent =
-    apiInternal.request?.userAgent ||
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
   try {
-    // 3. Request tới Zalo (Stream)
-    const response = await axios({
-      method: "get",
-      url: url,
-      responseType: "stream",
+    // 1. Fetch resource từ Zalo/External
+    const response = await fetch(url, {
       headers: {
-        Cookie: cookie,
-        "User-Agent": userAgent,
+        // Giả lập User-Agent để tránh bị chặn
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         Referer: "https://chat.zalo.me/",
-        // Forward range header for seeking support
-        Range: req.headers.get("range") || undefined,
       },
-      validateStatus: () => true,
     });
 
-    // 4. Trả về Stream cho Client
-    const headers = new Headers();
-    if (response.headers["content-type"]) {
-      headers.set("Content-Type", response.headers["content-type"]);
-    }
-    if (response.headers["content-length"]) {
-      headers.set("Content-Length", response.headers["content-length"]);
-    }
-    if (response.headers["content-range"]) {
-      headers.set("Content-Range", response.headers["content-range"]);
-    }
-    if (response.headers["accept-ranges"]) {
-      headers.set("Accept-Ranges", response.headers["accept-ranges"]);
+    if (!response.ok) {
+      console.error(
+        `Proxy Fetch Error: ${response.status} ${response.statusText}`,
+      );
+      return new NextResponse("Failed to fetch upstream", { status: 502 });
     }
 
-    // [FIX] TypeScript issue with axios stream & NextResponse body
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return new NextResponse(response.data as any, {
-      status: response.status,
-      headers: headers,
+    // 2. Chuẩn bị Headers trả về
+    const contentType =
+      response.headers.get("content-type") || "application/octet-stream";
+    const headers = new Headers();
+    headers.set("Content-Type", contentType);
+    // Cache mạnh (1 năm) vì URL media của Zalo thường immutable
+    headers.set("Cache-Control", "public, max-age=31536000, immutable");
+
+    // 3. Stream body về Client
+    return new NextResponse(response.body, {
+      status: 200,
+      headers,
     });
   } catch (error) {
-    console.error("[MediaProxy] Error:", error);
-    return new NextResponse("Proxy Error", { status: 500 });
+    console.error("Proxy Error:", error);
+    return new NextResponse("Internal Server Error", { status: 500 });
   }
 }

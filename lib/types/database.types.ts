@@ -1,6 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/types/database.types.ts
- * [UPDATED V2.5 Strict] Match User's V6 DB Structure.
+ * [MERGED V6.5.1]
+ * - Removed 'zalo_customer_mappings' from Database Interface (Database Consistency).
  */
 
 export type Json =
@@ -29,14 +31,16 @@ export interface ZaloBotStatus {
     | "QR_WAITING"
     | "LOGGED_IN"
     | "ERROR"
-    | "ACTIVE";
+    | "ACTIVE"
+    | "QR_SCAN";
   error_message?: string | null;
   qr_code?: string | null;
   last_update?: string;
   debug_code?: string;
+  message?: string;
 }
 
-// --- DATABASE INTERFACE ---
+// --- DATABASE INTERFACE (Supabase Generated) ---
 export interface Database {
   public: {
     Tables: {
@@ -75,15 +79,16 @@ export interface Database {
         Insert: Partial<StaffAccount>;
         Update: Partial<StaffAccount>;
       };
+      // [REMOVED] Table 'zalo_customer_mappings' not in DB
     };
   };
 }
 
-// --- ENTITIES (MATCHING V6 SCHEMA) ---
+// --- RAW ENTITIES (MATCHING V6 SCHEMA) ---
 
 export interface ZaloIdentity {
   id: string;
-  zalo_global_id: string; // [UPDATED NAME]
+  zalo_global_id: string;
   type: "system_bot" | "user" | "stranger" | "customer";
 
   display_name: string | null;
@@ -106,16 +111,18 @@ export interface ZaloBotInfo {
 
   access_token: Json | null;
   secret_key: string | null;
+  refresh_token?: string;
 
-  status: Json | null; // { state: 'STOPPED' | 'ACTIVE' | ... }
+  status: Json | null; // Cast về ZaloBotStatus
   is_active: boolean;
 
   is_realtime_active: boolean;
   auto_sync_interval: number;
 
-  // [ADDED]
-  health_check_log?: Json | null; // Cast về HealthCheckLog
+  health_check_log?: Json | null;
   last_active_at?: string | null;
+
+  avatar?: string; // [Virtual/Joined]
 
   created_at: string;
   updated_at: string;
@@ -124,20 +131,23 @@ export interface ZaloBotInfo {
 export interface StaffBotPermission {
   id: number;
   staff_id: string;
-  bot_id: string; // References zalo_bot_info.id
+  bot_id: string;
   permission_type: "owner" | "chat" | "view_only";
   assigned_at: string;
 }
 
 export interface Conversation {
   id: string;
-  type: "private" | "group";
+  type: "private" | "group"; // Map từ DB (text)
   global_group_id: string | null;
   name: string | null;
   avatar: string | null;
   participant_ids: string[] | null;
   raw_data: Json | null;
   last_activity_at: string;
+
+  last_message?: Json; // [Added] Field jsonb lưu snippet tin nhắn cuối
+
   created_at: string;
   updated_at: string;
 }
@@ -149,7 +159,7 @@ export interface ConversationMember {
   settings: Json | null;
   last_seen_msg_id: number | null;
   joined_at: string;
-  thread_id: string | null; // [ADDED]
+  thread_id: string | null;
 }
 
 export interface Message {
@@ -159,12 +169,31 @@ export interface Message {
   sender_identity_id: string | null;
   staff_id: string | null;
 
-  content: Json;
+  content: Json; // NormalizedContent
   raw_content: Json | null;
   listening_bot_ids: string[] | null;
 
   sent_at: string;
   created_at: string;
+
+  // [UI EXTENSIONS] Các trường này cần thiết cho ChatFrame/Action
+  // Có thể là column thật hoặc computed/joined từ query
+  sender_type?: "customer" | "bot" | "staff";
+  bot_send_id?: string | null;
+  sender_id?: string; // Alias cho sender_identity_id trong UI logic
+
+  // Virtual Relations (khi query join)
+  sender_identity?: {
+    id: string;
+    name: string;
+    display_name: string;
+    avatar: string;
+    type?: string;
+  };
+  staff_accounts?: {
+    full_name: string;
+    avatar: string;
+  };
 }
 
 export interface StaffAccount {
@@ -173,6 +202,39 @@ export interface StaffAccount {
   full_name: string | null;
   role: "admin" | "staff";
   phone?: string | null;
+  password_hash?: string; // [Internal]
   is_active: boolean;
   created_at: string;
+  avatar?: string | null;
+}
+
+// [NOTE] Interface kept for potential future use or local type casting
+export interface ZaloCustomerMapping {
+  bot_id: string;
+  customer_id: string;
+  status: "friend" | "stranger" | "blocked";
+  last_interaction_at: string;
+  bot_alias?: string;
+}
+
+// --- DOMAIN/UI ALIAS TYPES (Compatibility Layer) ---
+
+// [ZaloBot] Dùng cho BotInterface, BotManagerPanel
+export interface ZaloBot extends Omit<ZaloBotInfo, "status" | "access_token"> {
+  status: ZaloBotStatus;
+  access_token: any; // Allow flexible token structure
+  avatar?: string;
+}
+
+// [Customer] Dùng cho CRM
+export interface Customer {
+  id: string; // UUID (ZaloIdentity ID)
+  zalo_user_id: string; // zalo_global_id
+  display_name: string;
+  avatar: string;
+  phone?: string;
+  tags?: string[];
+  notes?: string;
+  created_at: string;
+  updated_at: string;
 }

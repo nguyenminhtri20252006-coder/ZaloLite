@@ -1,23 +1,15 @@
 /**
  * app/components/modules/ConversationList.tsx
- * [FIXED] Đã sửa logic tìm kiếm (Search) hoạt động phía Client.
+ * [MERGED]
+ * - Logic cũ: Search Client, Peers/Presence, Controlled Component.
+ * - Logic mới: Render Snippet (Media), Format Time chuẩn.
  */
+import React, { useMemo } from "react";
 import { ThreadInfo } from "@/lib/types/zalo.types";
 import { Avatar } from "@/app/components/ui/Avatar";
 import { IconSearch } from "@/app/components/ui/Icons";
 import { PresenceState } from "@/lib/hooks/usePresence";
-import { useMemo } from "react";
-
-const formatTime = (isoString?: string) => {
-  if (!isoString) return "";
-  const date = new Date(isoString);
-  const now = new Date();
-  const diff = now.getTime() - date.getTime();
-  if (diff < 24 * 60 * 60 * 1000 && now.getDate() === date.getDate()) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-  return date.toLocaleDateString([], { day: "2-digit", month: "2-digit" });
-};
+import { renderSnippet, formatTime } from "@/lib/utils/text-renderer";
 
 export function ConversationList({
   threads,
@@ -99,10 +91,15 @@ export function ConversationList({
           </div>
         ) : (
           filteredThreads.map((thread) => {
+            // Logic Realtime Presence
             const viewers = peers.filter(
               (p) => p.viewing_thread_id === thread.id,
             );
             const typers = viewers.filter((p) => p.is_typing);
+
+            // Logic Hien thi Snippet
+            const snippet = renderSnippet(thread.lastMessage);
+            const timeStr = formatTime(thread.lastActivity);
 
             return (
               <button
@@ -117,7 +114,7 @@ export function ConversationList({
                 <div className="relative">
                   <Avatar
                     src={thread.avatar}
-                    alt={thread.name}
+                    name={thread.name}
                     isGroup={thread.type === 1}
                   />
                   {thread.type === 1 && (
@@ -142,7 +139,7 @@ export function ConversationList({
                       {thread.name}
                     </h3>
                     <span className="text-[10px] text-gray-500 font-mono shrink-0">
-                      {formatTime(thread.lastActivity)}
+                      {timeStr}
                     </span>
                   </div>
 
@@ -154,7 +151,18 @@ export function ConversationList({
                           {typers[0].username} đang soạn...
                         </span>
                       ) : (
-                        <span className="opacity-50 truncate">{thread.id}</span>
+                        // [UPDATED] Hiển thị snippet thay vì ID
+                        <span
+                          className={
+                            thread.lastMessage?.type !== "text" ? "italic" : ""
+                          }
+                        >
+                          {snippet || (
+                            <span className="opacity-50 text-[10px]">
+                              Chưa có tin nhắn
+                            </span>
+                          )}
+                        </span>
                       )}
                     </div>
 
