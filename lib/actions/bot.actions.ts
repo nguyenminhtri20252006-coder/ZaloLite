@@ -3,7 +3,7 @@
 
 /**
  * lib/actions/bot.actions.ts
- * [UPDATED V7.3 - ADD SYNC ACTION]
+ * [UPDATED V7.6 - ROBUST LOGIN FALLBACK]
  */
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
@@ -71,7 +71,7 @@ export async function createPlaceholderBotAction() {
   const { data: info, error: infoError } = await supabase
     .from("zalo_bot_info")
     .insert({
-      name: name, // Table zalo_bot_info has 'name' column
+      name: name,
       status: { state: "QR_WAITING", message: "Đang chờ quét QR..." },
       is_active: true,
       is_realtime_active: false,
@@ -86,7 +86,7 @@ export async function createPlaceholderBotAction() {
     .insert({
       zalo_global_id: `temp_${info.id}`,
       type: "system_bot",
-      display_name: name, // Use display_name, NOT name
+      display_name: name,
       ref_bot_id: info.id,
     })
     .select()
@@ -97,6 +97,7 @@ export async function createPlaceholderBotAction() {
   return identity;
 }
 
+// [FIXED] Updated to use Full Credentials & ID Fallback
 export async function addBotWithTokenAction(
   tokenJsonString: string,
   tempBotId?: string,
@@ -112,34 +113,68 @@ export async function addBotWithTokenAction(
     return { success: false, error: "JSON Token không hợp lệ." };
   }
 
-  // 1. Verify Token & Get Info
-  const tempZalo = new Zalo({ selfListen: false });
-  let profile: any;
+  // 1. VERIFY TOKEN (DRY RUN)
+  // [FIX] Constructor takes 1 argument (merged options)
+  const zaloOptions = {
+    ...credentials,
+    selfListen: false,
+  };
+  const tempZalo = new Zalo(zaloOptions);
+
+  // Variables for bot data
+  let globalId: string | null = null;
+  let botName = "";
+  let botAvatar = "";
+
   try {
-    const api = await tempZalo.login({
-      cookie: credentials.cookie,
-      imei: credentials.imei,
-      userAgent: credentials.userAgent,
-    });
-    profile = await api.fetchAccountInfo();
-    if (!profile || (!profile.id && !profile.uid)) {
+    // Gọi login() để verify cookie/session key
+    const api = await tempZalo.login(credentials);
+
+    // [FALLBACK] Cố gắng lấy ID từ context trước (không cần mạng)
+    try {
+      const ownId = api.getOwnId();
+      if (ownId && ownId !== "0" && ownId !== "undefined") {
+        globalId = ownId;
+        console.log("[LoginCheck] Found ID from context:", globalId);
+      }
+    } catch (err) {
+      console.warn("[LoginCheck] Context ID check failed:", err);
+    }
+
+    // Sau đó thử fetch full profile
+    try {
+      const profile: any = await api.fetchAccountInfo();
+      if (profile) {
+        // [FIX] Check displayName (camelCase) based on TypeScript error
+        globalId = profile.id || profile.uid || globalId;
+        botName =
+          profile.displayName ||
+          profile.display_name ||
+          profile.name ||
+          profile.zalo_name;
+        botAvatar = profile.avatar || "";
+      }
+    } catch (err) {
+      console.warn("[LoginCheck] Fetch profile failed, using basic info.");
+    }
+
+    // Final check
+    if (!globalId) {
       throw new Error(
         "Token hợp lệ nhưng không lấy được ID. Vui lòng thử lại.",
       );
     }
+
+    if (!botName) botName = `Zalo User ${globalId}`;
   } catch (e: any) {
-    return { success: false, error: "Token lỗi: " + (e.message || String(e)) };
+    console.error("Token verification failed:", e);
+    return {
+      success: false,
+      error: "Token lỗi hoặc hết hạn: " + (e.message || String(e)),
+    };
   }
 
-  const globalId = profile.id || profile.uid;
-  const botName =
-    profile.display_name ||
-    profile.name ||
-    profile.zalo_name ||
-    `Zalo User ${globalId}`;
-  const botAvatar = profile.avatar || "";
-
-  // 2. Check Duplicate (Merge Logic)
+  // 2. CHECK DUPLICATE & MERGE
   const { data: existingBot } = await supabase
     .from("zalo_identities")
     .select("id, ref_bot_id")
@@ -150,17 +185,16 @@ export async function addBotWithTokenAction(
   let finalBotId = existingBot?.id;
 
   if (existingBot) {
-    // MERGE EXISTING
     if (existingBot.ref_bot_id) {
       await supabase
         .from("zalo_bot_info")
         .update({
-          access_token: credentials,
+          access_token: credentials, // Save FULL credentials
           name: botName,
           avatar: botAvatar,
           status: {
             state: "LOGGED_IN",
-            message: "Đã cập nhật token mới",
+            message: "Cập nhật token thành công",
             last_update: new Date().toISOString(),
           },
           last_active_at: new Date().toISOString(),
@@ -170,18 +204,17 @@ export async function addBotWithTokenAction(
       await supabase
         .from("zalo_identities")
         .update({
-          display_name: botName, // Use display_name
+          display_name: botName,
+          name: botName, // Ensure compatibility
           avatar: botAvatar,
           updated_at: new Date().toISOString(),
         })
         .eq("id", existingBot.id);
     }
-    // Cleanup Temp Bot
     if (tempBotId && tempBotId !== existingBot.id) {
       await deleteBotAction(tempBotId);
     }
   } else {
-    // NEW BOT or UPDATE PLACEHOLDER
     if (tempBotId) {
       finalBotId = tempBotId;
       const { data: tempIdentity } = await supabase
@@ -194,7 +227,7 @@ export async function addBotWithTokenAction(
         await supabase
           .from("zalo_bot_info")
           .update({
-            access_token: credentials,
+            access_token: credentials, // Save FULL credentials
             name: botName,
             avatar: botAvatar,
             status: {
@@ -210,7 +243,8 @@ export async function addBotWithTokenAction(
           .from("zalo_identities")
           .update({
             zalo_global_id: globalId,
-            display_name: botName, // Use display_name
+            display_name: botName,
+            name: botName,
             avatar: botAvatar,
             updated_at: new Date().toISOString(),
           })
@@ -219,7 +253,7 @@ export async function addBotWithTokenAction(
     }
   }
 
-  // 3. Start Runtime
+  // 3. START RUNTIME
   if (finalBotId) {
     try {
       const manager = BotRuntimeManager.getInstance();
@@ -260,7 +294,6 @@ export async function deleteBotAction(identityId: string) {
   return { success: true };
 }
 
-// [FIX] Add Missing Stop Action
 export async function stopBotAction(botId: string) {
   await requireAdmin();
   try {
@@ -276,7 +309,6 @@ export async function stopBotAction(botId: string) {
 export async function toggleRealtimeAction(botId: string, enable: boolean) {
   await requireAdmin();
 
-  // Update DB
   const { data: identity } = await supabase
     .from("zalo_identities")
     .select("ref_bot_id")
@@ -289,7 +321,6 @@ export async function toggleRealtimeAction(botId: string, enable: boolean) {
       .eq("id", identity.ref_bot_id);
   }
 
-  // Call Runtime
   const manager = BotRuntimeManager.getInstance();
   if (enable) {
     try {
@@ -335,9 +366,6 @@ export async function retryBotLoginAction(identityId: string) {
   }
 }
 
-/**
- * [NEW] Manual Sync Action
- */
 export async function syncBotDataAction(botId: string) {
   try {
     await requireAdmin();
