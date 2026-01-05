@@ -1,32 +1,28 @@
 /**
- * app/(dashboard)/bot-manager/page.tsx
- * [UPDATED] Fix Build Error: Pass 'userRole' & 'onCreateBot' to Panel.
+ * app/(system)/bot-manager/page.tsx
+ * [UPDATED] Fix: Removed deprecated 'createBotAction' usage.
  */
 
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { ZaloBot, ZaloBotStatus } from "@/lib/types/database.types";
 import { BotManagerPanel } from "@/app/components/modules/BotManagerPanel";
 import {
   getBotsAction,
-  createBotAction,
   deleteBotAction,
   startBotLoginAction,
 } from "@/lib/actions/bot.actions";
-import { getStaffSession } from "@/lib/actions/staff.actions"; // [NEW] Import để lấy role
+import { getStaffSession } from "@/lib/actions/staff.actions";
 
 export default function BotManagerPage() {
   const [bots, setBots] = useState<ZaloBot[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [userRole, setUserRole] = useState<string>("staff"); // [NEW] State lưu role
+  const [userRole, setUserRole] = useState<string>("staff");
 
   // State quản lý QR Code Flow
   const [activeQrBotId, setActiveQrBotId] = useState<string | null>(null);
   const [qrCodeData, setQrCodeData] = useState<string | null>(null);
-
-  // SSE Ref (Giữ nguyên logic cũ nếu còn dùng, dù BotInterface đã có Realtime riêng)
-  const eventSourceRef = useRef<EventSource | null>(null);
 
   // --- 1. Data Fetching ---
   const fetchData = async () => {
@@ -68,14 +64,8 @@ export default function BotManagerPage() {
   };
 
   // --- 2. Handlers ---
-  const handleCreateBot = async (name: string) => {
-    try {
-      await createBotAction(name);
-      fetchData(); // Reload list
-    } catch (e) {
-      alert("Lỗi tạo bot: " + (e as Error).message);
-    }
-  };
+
+  // [REMOVED] handleCreateBot - Logic tạo bot giờ được xử lý bên trong BotManagerPanel (LoginPanel)
 
   const handleDeleteBot = async (id: string) => {
     try {
@@ -111,13 +101,13 @@ export default function BotManagerPage() {
       bots={bots}
       isLoading={isLoading}
       onRefresh={fetchData}
-      onCreateBot={handleCreateBot} // [FIX] Truyền prop này
+      // onCreateBot={handleCreateBot} // [REMOVED] No longer needed
       onDeleteBot={handleDeleteBot}
       onStartLogin={handleStartLogin}
       activeQrBotId={activeQrBotId}
       setActiveQrBotId={setActiveQrBotId}
       qrCodeData={qrCodeData}
-      userRole={userRole} // [FIX] Truyền prop này (Admin mới thấy nút Xóa/Thêm)
+      userRole={userRole}
     />
   );
 }

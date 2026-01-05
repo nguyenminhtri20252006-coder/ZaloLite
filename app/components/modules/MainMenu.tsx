@@ -1,208 +1,161 @@
-/**
- * app/components/modules/MainMenu.tsx
- * [UPDATED] Thêm menu Staff, cập nhật label.
- */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
-import { ReactNode } from "react";
-import { ViewState } from "@/lib/types/zalo.types";
+import React, { useState } from "react";
+import { usePathname } from "next/navigation";
+import Link from "next/link";
+import { Avatar } from "@/app/components/ui/Avatar";
+import { staffLogoutAction } from "@/lib/actions/staff.actions";
 import {
-  IconUser,
-  IconLogout,
-  IconMenuToggle,
-  IconChatBubble,
+  IconMessage,
   IconRobot,
   IconUsers,
+  IconChart,
+  IconSettings,
+  IconLogout,
+  IconDatabase,
+  IconBack, // Dùng tạm icon mũi tên để biểu thị thu gọn
+  IconForward, // Dùng tạm icon mũi tên để biểu thị mở rộng
 } from "@/app/components/ui/Icons";
-import { staffLogoutAction } from "@/lib/actions/staff.actions";
 
-// Component TabButton & ActionButton (Giữ nguyên)
-const TabButton = ({
-  icon: Icon,
-  label,
-  isActive,
-  onClick,
-  isExpanded,
-}: {
-  icon: (props: { className: string }) => ReactNode;
-  label: string;
-  isActive: boolean;
-  onClick: () => void;
-  isExpanded: boolean;
-}) => (
-  <button
-    onClick={onClick}
-    className={`flex w-full items-center gap-3 rounded-lg p-3 text-left text-sm transition-all duration-200 ${
-      isActive
-        ? "bg-blue-600 text-white shadow-md shadow-blue-900/20"
-        : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-    }`}
-    title={label}
-  >
-    <Icon
-      className={`h-6 w-6 flex-shrink-0 ${
-        isActive ? "text-white" : "text-gray-400"
-      }`}
-    />
-    <span
-      className={`flex-1 font-medium whitespace-nowrap overflow-hidden transition-opacity duration-200 ${
-        isExpanded ? "opacity-100" : "opacity-0 w-0"
-      }`}
-    >
-      {label}
-    </span>
-  </button>
-);
+interface MainMenuProps {
+  staffInfo: {
+    name: string;
+    role: string;
+    avatar?: string;
+  } | null;
+  // [CLEANUP] Loại bỏ các props điều khiển từ Server Component để tránh lỗi serialization
+  // Tự quản lý state hiển thị bên trong component này
+}
 
-const ActionButton = ({
-  icon: Icon,
-  label,
-  onClick,
-  isExpanded,
-  isDestructive = false,
-}: {
-  icon: (props: { className: string }) => ReactNode;
-  label: string;
-  onClick: () => void;
-  isExpanded: boolean;
-  isDestructive?: boolean;
-}) => (
-  <button
-    onClick={onClick}
-    className={`flex w-full items-center gap-3 rounded-lg p-3 text-left text-sm transition-colors ${
-      isDestructive
-        ? "text-red-400 hover:bg-red-900/30 hover:text-red-300"
-        : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-    }`}
-    title={label}
-  >
-    <Icon className="h-6 w-6 flex-shrink-0" />
-    <span
-      className={`flex-1 whitespace-nowrap overflow-hidden transition-opacity duration-200 ${
-        isExpanded ? "opacity-100" : "opacity-0 w-0"
-      }`}
-    >
-      {label}
-    </span>
-  </button>
-);
+export function MainMenu({ staffInfo }: MainMenuProps) {
+  const pathname = usePathname();
 
-export function MainMenu({
-  staffInfo,
-  isExpanded,
-  onToggleMenu,
-  currentView,
-  onChangeView,
-  customWidth,
-}: {
-  staffInfo: { name: string; role: string; username: string } | null;
-  isExpanded: boolean;
-  onToggleMenu: () => void;
-  currentView: ViewState;
-  onChangeView: (view: ViewState) => void;
-  customWidth?: number;
-}) {
-  const handleLogout = async () => {
-    if (confirm("Bạn có chắc chắn muốn đăng xuất?")) await staffLogoutAction();
-  };
+  // [LOGIC MOVED] State tự quản lý việc đóng mở menu
+  const [isExpanded, setIsExpanded] = useState(false);
 
-  const isAdmin = staffInfo?.role === "admin";
+  // Xác định active menu dựa trên URL
+  const isActive = (path: string) => pathname.startsWith(path);
+
+  const menuItems = [
+    { id: "chat", label: "Live Chat", icon: IconMessage, path: "/chat_live" },
+    {
+      id: "manage",
+      label: "Quản lý Bot",
+      icon: IconRobot,
+      path: "/bot-manager",
+    },
+    { id: "crm", label: "Khách hàng", icon: IconDatabase, path: "/crm" },
+    { id: "dashboard", label: "Thống kê", icon: IconChart, path: "/dashboard" },
+  ];
+
+  if (staffInfo?.role === "admin") {
+    menuItems.push({
+      id: "staff",
+      label: "Nhân sự",
+      icon: IconUsers,
+      path: "/staff-manager",
+    });
+  }
+
+  // Width tính toán dựa trên state nội bộ
+  const currentWidth = isExpanded ? 240 : 64;
 
   return (
     <div
-      className="flex h-full flex-col bg-gray-900 border-r border-gray-800 py-4 flex-shrink-0 overflow-hidden relative"
-      style={{ width: customWidth ? `${customWidth}px` : undefined }}
+      className="flex flex-col h-full bg-gray-900 text-gray-400 select-none overflow-hidden transition-all duration-300 border-r border-gray-800"
+      style={{ width: currentWidth }}
     >
-      {/* 1. Staff Profile */}
-      <div
-        className={`flex items-center gap-3 px-3 mb-6 ${
-          !isExpanded ? "justify-center" : ""
-        }`}
-      >
-        <div className="shrink-0">
-          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-900/50 border border-blue-700 text-blue-200 font-bold">
-            {staffInfo?.username?.substring(0, 2).toUpperCase() || "AD"}
-          </div>
-        </div>
-        <div
-          className={`flex-1 overflow-hidden transition-opacity duration-200 ${
-            isExpanded ? "opacity-100" : "opacity-0 w-0 hidden"
-          }`}
-        >
-          {staffInfo ? (
-            <>
-              <h3 className="truncate font-bold text-white text-sm">
-                {staffInfo.name}
-              </h3>
-              <p className="truncate text-xs text-gray-500 font-mono uppercase">
-                {staffInfo.role}
-              </p>
-            </>
-          ) : (
-            <div className="h-8 w-24 bg-gray-800 rounded animate-pulse" />
-          )}
-        </div>
-      </div>
-
-      {/* 2. Navigation */}
-      <div className="flex-1 space-y-2 px-3 overflow-y-auto scrollbar-thin">
-        <TabButton
-          icon={IconChatBubble}
-          label="Live Chat"
-          isActive={currentView === "chat"}
-          onClick={() => onChangeView("chat")}
-          isExpanded={isExpanded}
-        />
-
-        <TabButton
-          icon={IconRobot}
-          label="Quản lý Bot"
-          isActive={currentView === "manage"}
-          onClick={() => onChangeView("manage")}
-          isExpanded={isExpanded}
-        />
-
-        {/* Chỉ Admin mới thấy Tab Quản lý Nhân viên */}
-        {isAdmin && (
-          <TabButton
-            icon={IconUser}
-            label="Quản lý Nhân viên"
-            isActive={currentView === "staff"}
-            onClick={() => onChangeView("staff")}
-            isExpanded={isExpanded}
+      {/* 1. User Info (Top) */}
+      <div className="p-4 border-b border-gray-800 flex items-center gap-3 h-[70px] bg-gray-900/50">
+        <div className="relative group cursor-pointer shrink-0">
+          <Avatar
+            src={staffInfo?.avatar || ""}
+            alt={staffInfo?.name || "U"}
+            size="md"
           />
-        )}
+          <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-gray-900"></div>
+        </div>
 
-        <TabButton
-          icon={IconUsers}
-          label="CRM Khách Hàng"
-          isActive={currentView === "crm"}
-          onClick={() => onChangeView("crm")}
-          isExpanded={isExpanded}
-        />
+        {isExpanded && (
+          <div className="flex-1 min-w-0 overflow-hidden animate-fade-in delay-100">
+            <h3 className="font-bold text-white truncate text-sm">
+              {staffInfo?.name}
+            </h3>
+            <p className="text-xs text-gray-500 truncate capitalize">
+              {staffInfo?.role}
+            </p>
+          </div>
+        )}
       </div>
 
-      {/* 3. Footer */}
-      <div className="mt-auto px-3 pt-4 border-t border-gray-800 space-y-1">
-        <ActionButton
-          icon={IconLogout}
-          label="Đăng xuất"
-          onClick={handleLogout}
-          isExpanded={isExpanded}
-          isDestructive={true}
-        />
+      {/* 2. Menu Items */}
+      <div className="flex-1 py-4 flex flex-col gap-1 overflow-y-auto overflow-x-hidden scrollbar-thin">
+        {menuItems.map((item) => {
+          const active = isActive(item.path);
+          return (
+            <Link
+              key={item.id}
+              href={item.path}
+              className={`flex items-center px-4 py-3 mx-2 rounded-lg transition-all group relative
+                ${
+                  active
+                    ? "bg-blue-600/10 text-blue-400"
+                    : "hover:bg-gray-800 hover:text-white"
+                }
+              `}
+              title={item.label}
+            >
+              <item.icon
+                className={`w-6 h-6 shrink-0 ${
+                  active ? "text-blue-400" : "group-hover:text-white"
+                }`}
+              />
+
+              {isExpanded && (
+                <span className="ml-3 font-medium text-sm truncate animate-fade-in">
+                  {item.label}
+                </span>
+              )}
+
+              {/* Active Indicator Bar */}
+              {active && (
+                <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-blue-500 rounded-r"></div>
+              )}
+            </Link>
+          );
+        })}
+      </div>
+
+      {/* 3. Footer Actions */}
+      <div className="p-4 border-t border-gray-800 flex flex-col gap-2 bg-gray-900/50">
         <button
-          onClick={onToggleMenu}
-          className="flex w-full items-center justify-center gap-3 rounded-lg p-3 text-gray-500 hover:text-white hover:bg-gray-800 transition-colors mt-2"
+          onClick={() => setIsExpanded(!isExpanded)}
+          className="flex items-center px-2 py-2 rounded-lg hover:bg-gray-800 transition-colors w-full group text-gray-500"
           title={isExpanded ? "Thu gọn" : "Mở rộng"}
         >
-          <IconMenuToggle
-            className={`h-6 w-6 transition-transform duration-300 ${
-              isExpanded ? "rotate-180" : ""
-            }`}
-            isExpanded={isExpanded}
-          />
+          {isExpanded ? (
+            <IconBack className="w-5 h-5 shrink-0" />
+          ) : (
+            <IconForward className="w-5 h-5 shrink-0" />
+          )}
+          {isExpanded && (
+            <span className="ml-3 text-sm font-medium">Thu gọn</span>
+          )}
         </button>
+
+        <form action={staffLogoutAction}>
+          <button
+            type="submit"
+            className="flex items-center px-2 py-2 rounded-lg hover:bg-red-900/20 hover:text-red-400 transition-colors w-full group text-gray-500"
+            title="Đăng xuất"
+          >
+            <IconLogout className="w-5 h-5 shrink-0" />
+            {isExpanded && (
+              <span className="ml-3 text-sm font-medium">Đăng xuất</span>
+            )}
+          </button>
+        </form>
       </div>
     </div>
   );

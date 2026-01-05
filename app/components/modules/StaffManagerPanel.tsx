@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
 
 import { useState, useEffect } from "react";
@@ -7,26 +8,25 @@ import {
   updateStaffAction,
   deleteStaffAction,
   changeStaffPasswordAction,
-  getStaffBotPermissionsAction, // [NEW]
-  assignBotPermissionAction, // [NEW]
-  revokeBotPermissionAction, // [NEW]
+  getStaffBotPermissionsAction,
+  assignBotPermissionAction,
+  revokeBotPermissionAction,
 } from "@/lib/actions/staff.actions";
-import { getBotsAction } from "@/lib/actions/bot.actions"; // [NEW] Lấy danh sách Bot để hiển thị
+import { getBotsAction } from "@/lib/actions/bot.actions";
 import { Avatar } from "@/app/components/ui/Avatar";
 import {
   IconUserPlus,
   IconRefresh,
   IconCog,
   IconClose,
-  IconCheck,
-  IconRobot, // [NEW] Icon cho nút phân quyền
+  IconRobot,
 } from "@/app/components/ui/Icons";
 import { ZaloBot } from "@/lib/types/database.types";
 
 export function StaffManagerPanel() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [staffList, setStaffList] = useState<any[]>([]);
-  const [bots, setBots] = useState<ZaloBot[]>([]); // [NEW] Danh sách tất cả bot
+  const [bots, setBots] = useState<ZaloBot[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
@@ -46,8 +46,7 @@ export function StaffManagerPanel() {
     phone: "",
   });
 
-  // Permission State [NEW]
-  // Map<botId, permissionType> (Nếu không có trong map nghĩa là chưa được gán)
+  // Permission State
   const [staffPermissions, setStaffPermissions] = useState<
     Record<string, string>
   >({});
@@ -407,7 +406,8 @@ export function StaffManagerPanel() {
                                 {bot.name}
                               </p>
                               <p className="text-xs text-gray-500 font-mono truncate">
-                                {bot.global_id}
+                                {/* [FIX] Type casting global_id */}
+                                {(bot as any).global_id || "---"}
                               </p>
                             </div>
                           </div>

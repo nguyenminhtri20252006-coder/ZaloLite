@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/core/services/sync-service.ts
- * [CORE SERVICE - V6 ORCHESTRATOR]
- * Điều phối luồng đồng bộ, sử dụng FriendService và ConversationService.
+ * [CORE SERVICE - V7.5 SAFE SYNC]
+ * - Fix logic upsert ID.
+ * - Fix column name mapping (name -> display_name)
  */
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
@@ -32,19 +33,39 @@ export class SyncService {
     }
   }
 
-  // --- 1. SELF PROFILE ---
+  // --- 1. SELF PROFILE (SAFE UPDATE) ---
   private static async syncSelfProfile(botId: string, api: any) {
-    const info = await api.getSelfInfo();
-    if (!info || !info.uid) return;
+    const info = await api.fetchAccountInfo(); // Use fetchAccountInfo as fixed before
+    if (!info || (!info.id && !info.uid)) return;
 
-    await supabase.from("zalo_identities").upsert({
-      id: botId,
-      zalo_global_id: info.uid,
-      name: info.name,
+    const updatePayload: any = {
+      // [FIX] Map name -> display_name
+      display_name: info.display_name || info.name,
       avatar: info.avatar,
-      type: "system_bot",
       updated_at: new Date().toISOString(),
-    });
+    };
+
+    // Nếu DB chưa có Global ID thì điền vào. Nếu có rồi thì giữ nguyên (để tránh conflict unique nếu hệ thống đang sai lệch)
+    // Tuy nhiên, nếu addBotWithTokenAction đã chạy đúng, GlobalID đã chuẩn.
+    // Ta check xem GlobalID có thay đổi không
+
+    await supabase
+      .from("zalo_identities")
+      .update(updatePayload)
+      .eq("id", botId);
+
+    // Update cả bên Info table (Avatar)
+    const { data: identity } = await supabase
+      .from("zalo_identities")
+      .select("ref_bot_id")
+      .eq("id", botId)
+      .single();
+    if (identity?.ref_bot_id) {
+      await supabase
+        .from("zalo_bot_info")
+        .update({ avatar: info.avatar })
+        .eq("id", identity.ref_bot_id);
+    }
   }
 
   // --- 2. FRIENDS ---
@@ -59,58 +80,63 @@ export class SyncService {
 
     if (!friends || !Array.isArray(friends)) return;
 
-    console.log(`[Sync] Processing ${friends.length} friends...`);
+    // Batch processing limits
+    const BATCH_SIZE = 50;
 
-    for (const friend of friends) {
-      try {
-        const friendZaloId = friend.userId || friend.id || friend.uid;
-        if (!friendZaloId) continue;
+    for (let i = 0; i < friends.length; i += BATCH_SIZE) {
+      const batch = friends.slice(i, i + BATCH_SIZE);
+      await Promise.all(
+        batch.map(async (friend) => {
+          try {
+            const friendZaloId = friend.userId || friend.id || friend.uid;
+            if (!friendZaloId) return;
 
-        // 1. Upsert Identity
-        const identityId = await FriendService.upsertIdentity(
-          friendZaloId,
-          friend,
-          "user",
-          true,
-        );
-        if (!identityId) continue;
+            const identityId = await FriendService.upsertIdentity(
+              friendZaloId,
+              friend,
+              "user",
+              true,
+            );
+            if (!identityId) return;
 
-        // 2. Create Connection (Friend)
-        await FriendService.upsertConnection(
-          botId,
-          identityId,
-          friendZaloId,
-          "friend",
-        );
+            // 2. Create Connection (Friend)
+            await FriendService.upsertConnection(
+              botId,
+              identityId,
+              friendZaloId,
+              "friend",
+            );
 
-        // 3. Create Private Conversation
-        const convId = await ConversationService.upsertPrivateConversation(
-          botId,
-          identityId,
-          friend.displayName || friend.name || `User ${friendZaloId}`,
-          friend.avatar,
-        );
+            // 3. Create Private Conversation
+            const convId = await ConversationService.upsertPrivateConversation(
+              botId,
+              identityId,
+              friend.displayName || friend.name || `User ${friendZaloId}`,
+              friend.avatar,
+            );
 
-        // 4. Add Members to Private Chat
-        if (convId) {
-          // Bot (Admin) - Cần thread_id = UserID để gửi tin
-          await ConversationService.addMember(
-            convId,
-            botId,
-            "admin",
-            friendZaloId,
-          );
-          // Friend (Member)
-          await ConversationService.addMember(
-            convId,
-            identityId,
-            "member",
-            null,
-          );
-        }
-      } catch (e) {
-        console.error(`[Sync] Friend Item Error:`, e);
-      }
+            // 4. Add Members to Private Chat
+            if (convId) {
+              // Bot (Admin) - Cần thread_id = UserID để gửi tin
+              await ConversationService.addMember(
+                convId,
+                botId,
+                "admin",
+                friendZaloId,
+              );
+              // Friend (Member)
+              await ConversationService.addMember(
+                convId,
+                identityId,
+                "member",
+                null,
+              );
+            }
+          } catch (e) {
+            console.error(`[Sync] Friend Error:`, e);
+          }
+        }),
+      );
     }
   }
 

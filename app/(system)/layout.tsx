@@ -1,30 +1,36 @@
 import { getStaffSession } from "@/lib/actions/staff.actions";
 import { redirect } from "next/navigation";
 import { ReactNode } from "react";
+import { MainMenu } from "@/app/components/modules/MainMenu";
 
-export default async function DashboardLayout({
+export default async function SystemLayout({
   children,
 }: {
   children: ReactNode;
 }) {
-  // 1. Kiểm tra Session Staff (Stateless)
+  // 1. Auth Check (Server Side)
   const session = await getStaffSession();
+  if (!session) redirect("/login");
 
-  if (!session) {
-    // Chưa đăng nhập hoặc token hết hạn -> Đá về login
-    redirect("/login");
-  }
+  const staffInfo = {
+    name: session.full_name,
+    role: session.role,
+    avatar: session.avatar || undefined,
+  };
 
-  // 2. Render Layout
-  // Lưu ý: Sidebar (MainMenu) hiện tại đang nằm bên trong BotInterface (Client Component)
-  // để hỗ trợ tính năng Resizable. Do đó Layout này chỉ đóng vai trò container.
+  // 2. Render Layout with Sidebar
+  // LƯU Ý: Không truyền function props (onToggleMenu, etc) vào MainMenu vì đây là Server Component
   return (
     <div className="flex h-screen w-full bg-gray-900 text-gray-100 overflow-hidden">
-      {/* Nếu muốn Sidebar cố định cho cả /bot-manager và /dashboard, 
-        chúng ta có thể nhấc MainMenu ra đây. 
-        Tuy nhiên, để giữ tính năng Resizable của BotInterface, ta để children tự quản lý layout.
-      */}
-      <main className="flex-1 relative h-full w-full">{children}</main>
+      {/* GLOBAL SIDEBAR (Fixed) */}
+      <div className="flex-shrink-0 z-50 h-full">
+        <MainMenu staffInfo={staffInfo} />
+      </div>
+
+      {/* MAIN CONTENT AREA */}
+      <main className="flex-1 relative h-full w-full overflow-hidden">
+        {children}
+      </main>
     </div>
   );
 }
