@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from "next/server";
 import supabase from "@/lib/supabaseServer"; // Dùng Service Role
+import { hashPassword } from "@/lib/utils/security"; // [FIX] Import hash function
 
 export async function POST(req: NextRequest) {
   try {
@@ -27,13 +28,14 @@ export async function POST(req: NextRequest) {
     }
 
     // 2. Tạo Admin đầu tiên
-    // Lưu ý: Password ở đây nên được hash từ client hoặc dùng hàm hash tại server nếu có lib.
-    // Giả định password đã được xử lý hoặc lưu trực tiếp (cần cải thiện security sau)
+    // [FIX] Hash password trước khi lưu
+    const hashedPassword = hashPassword(password);
+
     const { data, error } = await supabase
       .from("staff_accounts")
       .insert({
         username,
-        password_hash: password, // Cần đảm bảo password này đã hash hoặc hash tại đây
+        password_hash: hashedPassword, // Lưu hashed password
         full_name: fullName || "System Admin",
         role: "admin",
         is_active: true,

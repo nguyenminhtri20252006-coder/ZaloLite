@@ -7,7 +7,6 @@
  */
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
-import { FriendService } from "@/lib/core/services/friend-service";
 import { ConversationService } from "@/lib/core/services/conversation-service";
 import supabase from "@/lib/supabaseServer";
 import { GroupInfoResponse } from "@/lib/types/zalo.types";
@@ -45,10 +44,7 @@ export class SyncService {
       updated_at: new Date().toISOString(),
     };
 
-    // Nếu DB chưa có Global ID thì điền vào. Nếu có rồi thì giữ nguyên (để tránh conflict unique nếu hệ thống đang sai lệch)
-    // Tuy nhiên, nếu addBotWithTokenAction đã chạy đúng, GlobalID đã chuẩn.
-    // Ta check xem GlobalID có thay đổi không
-
+    // Update Identity (No is_friend)
     await supabase
       .from("zalo_identities")
       .update(updatePayload)
@@ -85,26 +81,53 @@ export class SyncService {
 
     for (let i = 0; i < friends.length; i += BATCH_SIZE) {
       const batch = friends.slice(i, i + BATCH_SIZE);
+
+      // A. Upsert Identities (Global) - Bỏ is_friend
+      const identitiesToUpsert = batch
+        .map((f) => ({
+          zalo_global_id: f.userId || f.id || f.uid,
+          display_name: f.displayName || f.name || "Unknown User",
+          avatar: f.avatar || "",
+          type: "user",
+          updated_at: new Date().toISOString(),
+        }))
+        .filter((f) => f.zalo_global_id);
+
+      const { data: upsertedIdentities, error } = await supabase
+        .from("zalo_identities")
+        .upsert(identitiesToUpsert, { onConflict: "zalo_global_id" })
+        .select("id, zalo_global_id");
+
+      if (error) {
+        console.error("[Sync] Error upserting identities:", error);
+        continue;
+      }
+
+      // Map ZaloID -> UUID
+      const uuidMap = new Map<string, string>();
+      upsertedIdentities?.forEach((row: any) =>
+        uuidMap.set(row.zalo_global_id, row.id),
+      );
+
+      // B. Process Connections & Conversations
       await Promise.all(
         batch.map(async (friend) => {
           try {
             const friendZaloId = friend.userId || friend.id || friend.uid;
-            if (!friendZaloId) return;
+            const identityId = uuidMap.get(friendZaloId);
 
-            const identityId = await FriendService.upsertIdentity(
-              friendZaloId,
-              friend,
-              "user",
-              true,
-            );
             if (!identityId) return;
 
-            // 2. Create Connection (Friend)
-            await FriendService.upsertConnection(
-              botId,
-              identityId,
-              friendZaloId,
-              "friend",
+            // 1. Upsert Connection (Is Friend = TRUE)
+            await supabase.from("zalo_connections").upsert(
+              {
+                observer_id: botId,
+                target_id: identityId,
+                external_uid: friendZaloId,
+                relationship_data: { is_friend: true, source: "sync" },
+                last_interaction_at: new Date().toISOString(),
+              },
+              { onConflict: "observer_id, target_id" },
             );
 
             // 3. Create Private Conversation
@@ -133,7 +156,7 @@ export class SyncService {
               );
             }
           } catch (e) {
-            console.error(`[Sync] Friend Error:`, e);
+            console.error(`[Sync] Friend Processing Error:`, e);
           }
         }),
       );
@@ -148,12 +171,8 @@ export class SyncService {
       const raw = await api.getAllGroups();
       if (raw && typeof raw === "object") {
         if (raw.gridVerMap) groupIds = Object.keys(raw.gridVerMap);
-        else if (raw instanceof Map)
-          groupIds = Array.from(raw.keys()).map(String);
         else if (Array.isArray(raw))
-          groupIds = raw.map((g: any) =>
-            typeof g === "string" ? g : g.id || g.groupId,
-          );
+          groupIds = raw.map((g: any) => (typeof g === "string" ? g : g.id));
         else groupIds = Object.keys(raw);
       }
     } catch (e) {
@@ -174,9 +193,7 @@ export class SyncService {
         const gridInfoMap = groupInfosRes.gridInfoMap || {};
 
         for (const groupId of chunkIds) {
-          const targetKey = Object.keys(gridInfoMap).find((k) => k == groupId);
-          const info = gridInfoMap[targetKey || groupId];
-          if (!info) continue;
+          const info = gridInfoMap[groupId] || {};
 
           // 1. Upsert Group Conversation
           const convId = await ConversationService.upsertGroupConversation(
@@ -225,48 +242,52 @@ export class SyncService {
 
     for (let i = 0; i < uids.length; i += batchSize) {
       const batch = uids.slice(i, i + batchSize);
-      try {
-        let profiles: any = {};
-        if (typeof api.getGroupMembersInfo === "function") {
-          const res = await api.getGroupMembersInfo(batch);
-          profiles = res.profiles || {};
-        } else if (typeof api.getUserInfo === "function") {
-          profiles = await api.getUserInfo(batch);
-        }
 
-        for (const uid of batch) {
-          const p = profiles[uid] || { uid };
+      // Upsert Identities (Group Members) - No is_friend
+      const identitiesToUpsert = batch.map((uid) => ({
+        zalo_global_id: uid,
+        display_name: `Member ${uid}`, // Placeholder
+        type: "user",
+        updated_at: new Date().toISOString(),
+      }));
 
-          // 1. Upsert Identity (Stranger/User)
-          const identityId = await FriendService.upsertIdentity(
-            uid,
-            p,
-            "user",
-            false,
-          );
-          if (!identityId) continue;
+      const { data } = await supabase
+        .from("zalo_identities")
+        .upsert(identitiesToUpsert, { onConflict: "zalo_global_id" })
+        .select("id, zalo_global_id");
 
-          // 2. Upsert Connection (Stranger) - Nếu chưa có quan hệ
-          if (identityId !== botId) {
-            await FriendService.upsertConnection(
-              botId,
-              identityId,
-              uid,
-              "stranger",
-              { source_group: groupId },
-            );
+      if (data) {
+        for (const identity of data) {
+          // Create Connection (Stranger) ONLY IF NOT EXISTS
+          const { data: existingConn } = await supabase
+            .from("zalo_connections")
+            .select("id")
+            .eq("observer_id", botId)
+            .eq("target_id", identity.id)
+            .single();
+
+          if (!existingConn && identity.id !== botId) {
+            await supabase.from("zalo_connections").insert({
+              observer_id: botId,
+              target_id: identity.id,
+              external_uid: identity.zalo_global_id,
+              relationship_data: {
+                is_friend: false,
+                source: "group_sync",
+                group_id: groupId,
+              },
+              last_interaction_at: new Date().toISOString(),
+            });
           }
 
           // 3. Add Member to Group
           await ConversationService.addMember(
             convId,
-            identityId,
+            identity.id,
             "member",
             null,
           );
         }
-      } catch (e) {
-        console.error(`[Sync] Group Member Batch Error:`, e);
       }
     }
   }

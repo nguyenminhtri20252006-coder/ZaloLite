@@ -1,20 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use client";
-
 import React, { useState, useEffect, useTransition } from "react";
-import {
-  User,
-  Users,
-  Shield,
-  RefreshCw,
-  Search,
-  UserPlus,
-  UserX,
-  Ban,
-  Check,
-  X,
-  Plus,
-} from "lucide-react";
+import { UserX, Ban, Check, X, RefreshCw, UserPlus } from "lucide-react";
 import { ZaloUserProfile, ZaloUserResult } from "@/lib/types/zalo.types";
 import { Avatar } from "@/app/components/ui/Avatar";
 import {
@@ -24,8 +11,8 @@ import {
   IconCheck,
   IconClose,
   IconUsers,
+  IconClock,
 } from "@/app/components/ui/Icons";
-
 // Actions
 import {
   getBotProfileAction,
@@ -89,7 +76,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
   const [requestTabSub, setRequestTabSub] = useState<
     "incoming" | "sent" | "recomm"
   >("incoming");
-
   const [sentRequests, setSentRequests] = useState<any[]>([]);
   const [incomingRequests, setIncomingRequests] = useState<any[]>([]);
   const [recommendations, setRecommendations] = useState<any[]>([]);
@@ -109,65 +95,63 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
   const [groupLink, setGroupLink] = useState("");
 
   // --- FETCHERS ---
-
-  const fetchProfile = () =>
+  const fetchProfile = () => {
     startTransition(async () => {
+      // Hàm này giờ lấy từ DB -> Nhanh và Luôn thành công (nếu bot tồn tại)
       const res = await getBotProfileAction(botId);
-      if (res.success && res.data) setProfile(res.data);
+      if (res.success && res.data) {
+        setProfile(res.data);
+      } else {
+        console.error("Profile load failed:", res.error);
+      }
     });
+  };
 
-  const fetchFriendsData = () =>
+  const fetchFriendsData = () => {
+    // Các hàm này có thể cần Runtime, nếu lỗi sẽ trả về mảng rỗng để không crash
     startTransition(async () => {
       // 1. Friend List
       const res = await getFriendListAction(botId);
-      setFriends(res.success && Array.isArray(res.data) ? res.data : []);
+      if (res.success && Array.isArray(res.data)) setFriends(res.data);
 
       // 2. Requests & Recommendations
-      const [resSent, resIncoming, resRecomm] = await Promise.all([
-        getSentFriendRequestAction(botId),
-        getIncomingFriendRequestAction(botId),
-        getFriendRecommendationsAction(botId),
-      ]);
+      try {
+        const [resSent, resIncoming, resRecomm] = await Promise.all([
+          getSentFriendRequestAction(botId),
+          getIncomingFriendRequestAction(botId),
+          getFriendRecommendationsAction(botId),
+        ]);
 
-      setSentRequests(
-        resSent.success && Array.isArray(resSent.data) ? resSent.data : [],
-      );
-      setIncomingRequests(
-        resIncoming.success && Array.isArray(resIncoming.data)
-          ? resIncoming.data
-          : [],
-      );
-      setRecommendations(
-        resRecomm.success &&
-          resRecomm.data &&
-          Array.isArray(resRecomm.data.recommItems)
-          ? resRecomm.data.recommItems
-          : [],
-      );
+        if (resSent.success && Array.isArray(resSent.data))
+          setSentRequests(resSent.data);
+        if (resIncoming.success && Array.isArray(resIncoming.data))
+          setIncomingRequests(resIncoming.data);
+        if (resRecomm.success && resRecomm.data?.recommItems)
+          setRecommendations(resRecomm.data.recommItems);
+      } catch (e) {
+        console.warn("Fetch friends extra data failed (Bot might be offline)");
+      }
     });
+  };
 
-  const fetchGroupsData = () =>
+  const fetchGroupsData = () => {
     startTransition(async () => {
       const resGroups = await getAllGroupsAction(botId);
-      setGroups(
-        resGroups.success && Array.isArray(resGroups.data)
-          ? resGroups.data
-          : [],
-      );
+      if (resGroups.success && Array.isArray(resGroups.data))
+        setGroups(resGroups.data);
 
       const resInvites = await getGroupInvitesAction(botId);
-      setGroupInvites(
-        resInvites.success && Array.isArray(resInvites.data)
-          ? resInvites.data
-          : [],
-      );
+      if (resInvites.success && Array.isArray(resInvites.data))
+        setGroupInvites(resInvites.data);
     });
+  };
 
-  const fetchPrivacy = () =>
+  const fetchPrivacy = () => {
     startTransition(async () => {
       const res = await getBlockListAction(botId);
       setBlockList(res.success && Array.isArray(res.data) ? res.data : []);
     });
+  };
 
   // Init Data on Tab Change
   useEffect(() => {
@@ -179,7 +163,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
   }, [botId, activeTab]);
 
   // --- HANDLERS: ADD FRIEND ---
-
   const handleSearchUser = async () => {
     if (!addPhone) return;
     setFoundUser(null);
@@ -189,7 +172,9 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
       if (res.success && res.data) {
         setFoundUser(res.data);
       } else {
-        setSearchError(res.error || "Không tìm thấy người dùng.");
+        setSearchError(
+          res.error || "Không tìm thấy người dùng (hoặc Bot offline).",
+        );
       }
     });
   };
@@ -206,16 +191,14 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
         alert(`Đã gửi lời mời tới ${foundUser.displayName}!`);
         setFoundUser(null);
         setAddPhone("");
-        // Refresh Sent requests
         fetchFriendsData();
       } else {
-        alert(res.error);
+        alert(res.error || "Lỗi gửi kết bạn");
       }
     });
   };
 
   // --- HANDLERS: FRIEND ACTIONS ---
-
   const handleFriendActionClick = async (
     userId: string,
     type: "remove" | "block" | "undo" | "accept" | "reject" | "unblock",
@@ -225,7 +208,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
       !confirm(`Bạn chắc chắn muốn thực hiện hành động này?`)
     )
       return;
-
     startTransition(async () => {
       await handleFriendAction(botId, userId, type);
       if (type === "unblock") fetchPrivacy();
@@ -241,7 +223,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
   };
 
   // --- HANDLERS: GROUPS ---
-
   const handleJoinGroup = async () => {
     if (!groupLink) return;
     startTransition(async () => {
@@ -251,7 +232,7 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
         setGroupLink("");
         fetchGroupsData();
       } else {
-        alert(res.error);
+        alert(res.error || "Lỗi tham gia nhóm");
       }
     });
   };
@@ -266,7 +247,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
     });
   };
 
-  // Logic Create Group
   const handleToggleMember = (id: string) => {
     setNewGroupMembers((prev) =>
       prev.includes(id) ? prev.filter((uid) => uid !== id) : [...prev, id],
@@ -287,13 +267,12 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
         setNewGroupMembers([]);
         fetchGroupsData();
       } else {
-        alert(res.error);
+        alert(res.error || "Lỗi tạo nhóm");
       }
     });
   };
 
   // --- RENDERERS ---
-
   const renderProfileTab = () => (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <div className="flex items-center gap-4 p-4 bg-gray-700/50 rounded-lg border border-gray-700">
@@ -311,14 +290,16 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
           <h3 className="text-xl font-bold text-white">
             {profile?.displayName || "Đang tải..."}
           </h3>
-          <p className="text-sm text-gray-400">ID: {profile?.userId}</p>
-          <p className="text-sm italic text-gray-300 mt-1">
-            &quot;{profile?.status || "..."}&quot;
+          <p className="text-sm text-gray-400">Global ID: {profile?.userId}</p>
+          <p className="text-sm italic text-gray-300 mt-1 flex items-center gap-2">
+            <IconClock className="w-3 h-3" /> Status: &quot;
+            {profile?.status || "..."}&quot;
           </p>
         </div>
         <button
           onClick={fetchProfile}
           className="ml-auto p-2 hover:bg-gray-600 rounded-full text-gray-300"
+          title="Tải lại từ DB"
         >
           <RefreshCw size={18} className={isPending ? "animate-spin" : ""} />
         </button>
@@ -330,7 +311,8 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
             {profile?.gender === 0 ? "Nam" : "Nữ"}
           </p>
           <p>
-            <span className="text-gray-500">Ngày sinh:</span> {profile?.sdob}
+            <span className="text-gray-500">Ngày sinh:</span>{" "}
+            {profile?.sdob || "---"}
           </p>
           <p>
             <span className="text-gray-500">SĐT:</span>{" "}
@@ -344,7 +326,9 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
           <button
             onClick={() => {
               startTransition(async () => {
-                await updateActiveStatusAction(botId, true);
+                const res = await updateActiveStatusAction(botId, true);
+                if (!res.success)
+                  alert("Bot offline, không thể cập nhật trạng thái online.");
               });
             }}
             className="px-3 py-1 bg-green-700 text-white rounded text-sm hover:bg-green-600 border border-green-600"
@@ -391,14 +375,13 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
           Lời mời ({incomingRequests.length})
         </button>
       </div>
-
       <div className="min-h-[300px]">
         {/* VIEW: LIST */}
         {friendTabSub === "list" && (
           <div className="max-h-[400px] overflow-y-auto space-y-1 pr-1">
             {friends.length === 0 && (
               <p className="text-center text-xs text-gray-500 py-8">
-                Chưa có bạn bè.
+                Chưa có dữ liệu bạn bè (Hãy chạy Sync).
               </p>
             )}
             {friends.map((friend: any) => (
@@ -443,7 +426,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
             ))}
           </div>
         )}
-
         {/* VIEW: ADD FRIEND */}
         {friendTabSub === "add" && (
           <div className="p-4 bg-gray-800 rounded-lg border border-gray-700">
@@ -466,11 +448,9 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
                 Tìm
               </button>
             </div>
-
             {searchError && (
               <p className="text-red-400 text-xs mb-3">{searchError}</p>
             )}
-
             {foundUser && (
               <div className="p-4 bg-gray-700/50 rounded-lg border border-gray-600 animate-fade-in">
                 <div className="flex items-center gap-3 mb-3">
@@ -506,7 +486,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
             )}
           </div>
         )}
-
         {/* VIEW: REQUESTS */}
         {friendTabSub === "requests" && (
           <div>
@@ -542,7 +521,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
                 Gợi ý
               </button>
             </div>
-
             <div className="max-h-[350px] overflow-y-auto space-y-2 pr-1">
               {/* INCOMING */}
               {requestTabSub === "incoming" && (
@@ -602,7 +580,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
                   ))}
                 </>
               )}
-
               {/* SENT */}
               {requestTabSub === "sent" && (
                 <>
@@ -641,13 +618,12 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
                   ))}
                 </>
               )}
-
               {/* RECOMMENDATIONS */}
               {requestTabSub === "recomm" && (
                 <>
                   {recommendations.length === 0 && (
                     <p className="text-center text-xs text-gray-500 mt-4">
-                      Không có gợi ý.
+                      Không có gợi ý (Bot có thể offline).
                     </p>
                   )}
                   {recommendations.map((item: any) => (
@@ -753,7 +729,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
           </button>
         </div>
       )}
-
       {/* Join Link */}
       <div className="p-3 bg-gray-700/30 rounded-lg border border-gray-700 flex gap-2">
         <input
@@ -771,7 +746,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
           Vào
         </button>
       </div>
-
       {/* Invites */}
       {groupInvites.length > 0 && (
         <div className="p-3 border border-yellow-700/50 bg-yellow-900/10 rounded-lg space-y-2">
@@ -812,7 +786,6 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
           ))}
         </div>
       )}
-
       {/* Group List */}
       <div>
         <div className="flex justify-between mb-2 items-center">
@@ -856,13 +829,16 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
   const renderPrivacyTab = () => (
     <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
       <h3 className="font-bold flex items-center gap-2 text-gray-200">
-        <Shield size={16} className="text-red-400" /> Chặn ({blockList.length})
+        <div className="p-1 bg-red-900/30 rounded">
+          <Ban size={16} className="text-red-400" />
+        </div>
+        Danh sách chặn ({blockList.length})
       </h3>
       <div className="border border-gray-700 rounded-lg bg-gray-900/50 overflow-hidden">
         {blockList.length === 0 ? (
           <p className="p-4 text-center text-xs text-gray-500">Trống</p>
         ) : (
-          <div className="divide-y divide-gray-800">
+          <div className="divide-y divide-gray-800 max-h-[250px] overflow-y-auto">
             {blockList.map((uid) => (
               <div
                 key={uid}
@@ -882,7 +858,7 @@ export function BotDetailTabs({ botId }: BotDetailTabsProps) {
       </div>
       <button
         onClick={fetchPrivacy}
-        className="text-xs text-gray-400 flex items-center gap-1"
+        className="text-xs text-gray-400 flex items-center gap-1 hover:text-white"
       >
         <RefreshCw size={12} /> Refresh
       </button>

@@ -49,6 +49,11 @@ export interface Database {
         Insert: Partial<ZaloIdentity>;
         Update: Partial<ZaloIdentity>;
       };
+      zalo_connections: {
+        Row: ZaloConnection;
+        Insert: Partial<ZaloConnection>;
+        Update: Partial<ZaloConnection>;
+      };
       zalo_bot_info: {
         Row: ZaloBotInfo;
         Insert: Partial<ZaloBotInfo>;
@@ -98,10 +103,26 @@ export interface ZaloIdentity {
   ref_cus_profile_id: string | null;
 
   raw_data: Json | null;
-  is_friend: boolean;
 
   created_at: string;
   updated_at: string;
+}
+
+export interface ZaloConnection {
+  id: string;
+  observer_id: string; // Bot ID
+  target_id: string; // User ID
+  external_uid: string; // Redundant Zalo ID for fast lookup
+  relationship_data: {
+    is_friend?: boolean;
+    is_blocked?: boolean;
+    is_following?: boolean;
+    source?: string;
+    tags?: string[];
+    notes?: string;
+    [key: string]: any;
+  };
+  last_interaction_at: string;
 }
 
 export interface ZaloBotInfo {
@@ -168,7 +189,7 @@ export interface Message {
   zalo_msg_id: string;
   sender_identity_id: string | null;
   staff_id: string | null;
-
+  sender_type: "bot" | "customer" | "staff" | "system"; // DB Column
   content: Json; // NormalizedContent
   raw_content: Json | null;
   listening_bot_ids: string[] | null;
@@ -176,13 +197,9 @@ export interface Message {
   sent_at: string;
   created_at: string;
 
-  // [UI EXTENSIONS] Các trường này cần thiết cho ChatFrame/Action
-  // Có thể là column thật hoặc computed/joined từ query
-  sender_type?: "customer" | "bot" | "staff";
+  // [UI EXTENSIONS]
   bot_send_id?: string | null;
-  sender_id?: string; // Alias cho sender_identity_id trong UI logic
-
-  // Virtual Relations (khi query join)
+  sender_id?: string;
   sender_identity?: {
     id: string;
     name: string;
@@ -208,33 +225,11 @@ export interface StaffAccount {
   avatar?: string | null;
 }
 
-// [NOTE] Interface kept for potential future use or local type casting
-export interface ZaloCustomerMapping {
-  bot_id: string;
-  customer_id: string;
-  status: "friend" | "stranger" | "blocked";
-  last_interaction_at: string;
-  bot_alias?: string;
-}
-
-// --- DOMAIN/UI ALIAS TYPES (Compatibility Layer) ---
-
-// [ZaloBot] Dùng cho BotInterface, BotManagerPanel
+// --- DOMAIN/UI ALIAS TYPES ---
 export interface ZaloBot extends Omit<ZaloBotInfo, "status" | "access_token"> {
   status: ZaloBotStatus;
-  access_token: any; // Allow flexible token structure
+  access_token: any;
   avatar?: string;
-}
-
-// [Customer] Dùng cho CRM
-export interface Customer {
-  id: string; // UUID (ZaloIdentity ID)
-  zalo_user_id: string; // zalo_global_id
-  display_name: string;
-  avatar: string;
-  phone?: string;
-  tags?: string[];
-  notes?: string;
-  created_at: string;
-  updated_at: string;
+  global_id?: string; // Alias for consistency
+  bot_info_id?: string;
 }

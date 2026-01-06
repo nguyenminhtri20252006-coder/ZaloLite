@@ -3,9 +3,9 @@
 
 /**
  * lib/actions/bot.actions.ts
- * [FIXED V9.8] SCHEMA SYNC & ERROR HANDLING
- * - Handled 'last_active_at' missing column error gracefully.
- * - Improved insertion logic flow.
+ * [UPDATED V10.7] SMART ID RESOLUTION
+ * - Fixed: deleteBotAction now handles both IdentityID and BotInfoID.
+ * - This prevents "Bot Identity not found" error when Client sends the wrong ID type.
  */
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
@@ -23,6 +23,36 @@ async function requireAdmin() {
   return session;
 }
 
+// [HELPER] Resolve Identity ID from either IdentityID or BotInfoID
+async function resolveIdentityId(
+  inputId: string,
+): Promise<{ identityId: string; botInfoId: string | null } | null> {
+  // 1. Try finding by Identity ID (Standard Case)
+  const { data: byId } = await supabase
+    .from("zalo_identities")
+    .select("id, ref_bot_id")
+    .eq("id", inputId)
+    .single();
+
+  if (byId) return { identityId: byId.id, botInfoId: byId.ref_bot_id };
+
+  // 2. Try finding by Ref Bot ID (Fallback Case - if Client sent Info ID)
+  const { data: byRef } = await supabase
+    .from("zalo_identities")
+    .select("id, ref_bot_id")
+    .eq("ref_bot_id", inputId)
+    .single();
+
+  if (byRef) {
+    console.log(
+      `[ResolveID] Input ${inputId} was actually a BotInfoID. Resolved to IdentityID: ${byRef.id}`,
+    );
+    return { identityId: byRef.id, botInfoId: byRef.ref_bot_id };
+  }
+
+  return null;
+}
+
 async function waitForBotId(
   api: any,
   maxRetries = 5,
@@ -30,13 +60,23 @@ async function waitForBotId(
   for (let i = 0; i < maxRetries; i++) {
     try {
       const id = api.getOwnId();
-      const profile = await api.fetchAccountInfo().catch(() => null);
+      const rawInfo = await api.fetchAccountInfo().catch(() => null);
 
-      if (profile && (profile.id || profile.uid)) {
+      // Unwrap profile/data
+      let profile = rawInfo;
+      if (rawInfo?.data) profile = rawInfo.data;
+      else if (rawInfo?.profile) profile = rawInfo.profile;
+
+      if (profile && (profile.id || profile.uid || profile.userId)) {
         return {
-          id: profile.id || profile.uid,
-          name: profile.display_name || profile.name || profile.zalo_name,
-          avatar: profile.avatar,
+          id: profile.id || profile.uid || profile.userId,
+          name:
+            profile.displayName ||
+            profile.display_name ||
+            profile.name ||
+            profile.zaloName ||
+            profile.username,
+          avatar: profile.avatar || profile.avt,
         };
       }
 
@@ -86,7 +126,10 @@ export async function getBotsAction(): Promise<ZaloBot[]> {
     .eq("type", "system_bot")
     .order("created_at", { ascending: false });
 
-  if (error) throw new Error(error.message);
+  if (error) {
+    const msg = error.message || JSON.stringify(error);
+    throw new Error(`Get Bots Error: ${msg}`);
+  }
 
   return data.map((item: any) => ({
     id: item.id,
@@ -102,6 +145,8 @@ export async function getBotsAction(): Promise<ZaloBot[]> {
 export async function createPlaceholderBotAction() {
   await requireAdmin();
   const name = `Bot Mới ${new Date().toLocaleTimeString()}`;
+
+  // 1. Create Info First
   const { data: info, error: infoError } = await supabase
     .from("zalo_bot_info")
     .insert({
@@ -112,7 +157,10 @@ export async function createPlaceholderBotAction() {
     })
     .select()
     .single();
+
   if (infoError) throw infoError;
+
+  // 2. Create Identity Linked to Info
   const { data: identity, error } = await supabase
     .from("zalo_identities")
     .insert({
@@ -123,7 +171,9 @@ export async function createPlaceholderBotAction() {
     })
     .select()
     .single();
+
   if (error) throw error;
+
   revalidatePath("/bot-manager");
   return identity;
 }
@@ -133,15 +183,28 @@ export async function addBotWithTokenAction(
   tempBotId?: string,
 ) {
   await requireAdmin();
+  console.log(
+    `[AddBot] Starting with token input length: ${tokenInput.length}`,
+  );
+
+  // 1. Parse Token
   let credentials: any = {};
   try {
     credentials = JSON.parse(tokenInput);
   } catch (e) {
     if (tokenInput.includes("zpw_sek") || tokenInput.trim().startsWith("{"))
       credentials = { cookie: tokenInput };
-    else return { success: false, error: "Token không hợp lệ" };
+    else
+      return { success: false, error: "Token không hợp lệ (JSON parse error)" };
   }
+
+  // Ensure necessary fields
   if (!credentials.imei) credentials.imei = generateRandomImei();
+  if (!credentials.userAgent)
+    credentials.userAgent =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (ZaloPC)";
+
+  // Handle cookie as string if needed
   if (
     typeof credentials.cookie === "string" &&
     credentials.cookie.trim().startsWith("{")
@@ -150,10 +213,8 @@ export async function addBotWithTokenAction(
       credentials.cookie = JSON.parse(credentials.cookie);
     } catch {}
   }
-  if (!credentials.userAgent)
-    credentials.userAgent =
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (ZaloPC)";
 
+  // 2. Verify Token with ZCA-JS
   console.log("--- [DEBUG] Starting Token Verification ---");
   const zaloOptions = {
     authType: "cookie",
@@ -162,18 +223,19 @@ export async function addBotWithTokenAction(
     userAgent: credentials.userAgent,
     selfListen: false,
   };
-  const tempZalo = new Zalo(zaloOptions);
 
   let globalId: string | null = null;
-  let botName = "";
+  let botName = "Zalo Bot";
   let botAvatar = "";
 
   try {
+    const tempZalo = new Zalo(zaloOptions);
     const api = await tempZalo.login(credentials);
     console.log("[DEBUG] Login OK. Fetching Info...");
     const info = await waitForBotId(api);
+
     if (info) {
-      globalId = info.id;
+      globalId = String(info.id);
       botName = info.name || `Zalo User ${globalId}`;
       botAvatar = info.avatar || "";
     } else {
@@ -185,239 +247,211 @@ export async function addBotWithTokenAction(
   } catch (e: any) {
     return {
       success: false,
-      error: "Lỗi xác thực: " + (e.message || String(e)),
+      error: "Lỗi xác thực Zalo: " + (e.message || String(e)),
     };
   }
 
-  // DB Logic
+  // 3. Database Sync Logic
+  const now = new Date().toISOString();
+  let finalBotId: string | undefined = undefined;
+
+  // Check if bot already exists by Global ID
   const { data: existingBot } = await supabase
     .from("zalo_identities")
     .select("id, ref_bot_id")
     .eq("zalo_global_id", globalId)
     .eq("type", "system_bot")
     .single();
-  let finalBotId: string | undefined = existingBot?.id;
-  const now = new Date().toISOString();
 
-  // Helper Object Payload (Dynamic key check)
-  // Nếu DB chưa update schema thì ta nên bỏ qua last_active_at trong payload để tránh lỗi
-  // Nhưng Supabase Client không check schema, nên ta cứ gửi, nếu lỗi thì phải sửa DB.
-  const botInfoUpdate = {
+  // Determine Bot Info ID to upsert
+  let botInfoIdToUpsert = existingBot?.ref_bot_id;
+
+  // Prepare Bot Info Payload
+  const botInfoPayload = {
     access_token: credentials,
     name: botName,
-
     status: {
       state: "LOGGED_IN",
       message: "Cập nhật token thành công",
       last_update: now,
     },
     last_active_at: now,
+    is_active: true,
+    avatar: botAvatar,
   };
 
-  if (existingBot) {
-    console.log(`[DEBUG] Found existing bot in DB: ${existingBot.id}`);
-    if (existingBot.ref_bot_id) {
-      const { error } = await supabase
+  try {
+    // A. Handle Bot Info (The Source of Truth for Token)
+    if (botInfoIdToUpsert) {
+      // Update existing info
+      console.log(`[DB] Updating existing Bot Info: ${botInfoIdToUpsert}`);
+      const { error: updateErr } = await supabase
         .from("zalo_bot_info")
-        .update(botInfoUpdate)
-        .eq("id", existingBot.ref_bot_id);
+        .update(botInfoPayload)
+        .eq("id", botInfoIdToUpsert);
 
-      if (error) {
-        console.error("[DEBUG] Update Bot Info Error:", error);
-        // Fallback: Try update without last_active_at if column missing
-        if (error.message.includes("last_active_at")) {
-          delete (botInfoUpdate as any).last_active_at;
-          await supabase
-            .from("zalo_bot_info")
-            .update(botInfoUpdate)
-            .eq("id", existingBot.ref_bot_id);
-        }
-      }
-
-      await supabase
-        .from("zalo_identities")
-        .update({
-          display_name: botName,
-          name: botName,
-          avatar: botAvatar,
-          updated_at: now,
-        })
-        .eq("id", existingBot.id);
-    }
-    if (tempBotId && tempBotId !== existingBot.id)
-      await deleteBotAction(tempBotId);
-  } else {
-    console.log(`[DEBUG] New bot detected.`);
-    if (tempBotId) {
-      console.log(`[DEBUG] Using tempBotId: ${tempBotId}`);
-      finalBotId = tempBotId;
-      const { data: tempIdentity } = await supabase
-        .from("zalo_identities")
-        .select("ref_bot_id")
-        .eq("id", tempBotId)
-        .single();
-      if (tempIdentity?.ref_bot_id) {
-        // Update Bot Info
-        const { error: infoErr } = await supabase
-          .from("zalo_bot_info")
-          .update({
-            ...botInfoUpdate,
-            status: {
-              state: "LOGGED_IN",
-              message: "Đăng nhập thành công",
-              last_update: now,
-            },
-          })
-          .eq("id", tempIdentity.ref_bot_id);
-
-        if (infoErr) {
-          console.error("[DEBUG] Update Temp Bot Info Error:", infoErr);
-          if (infoErr.message.includes("last_active_at")) {
-            delete (botInfoUpdate as any).last_active_at;
-            await supabase
-              .from("zalo_bot_info")
-              .update({
-                ...botInfoUpdate,
-                status: {
-                  state: "LOGGED_IN",
-                  message: "Đăng nhập thành công",
-                  last_update: now,
-                },
-              })
-              .eq("id", tempIdentity.ref_bot_id);
-          }
-        }
-
-        await supabase
-          .from("zalo_identities")
-          .update({
-            zalo_global_id: globalId,
-            display_name: botName,
-            name: botName,
-            avatar: botAvatar,
-            updated_at: now,
-          })
-          .eq("id", tempBotId);
-      }
+      if (updateErr)
+        throw new Error(`Update Info Failed: ${updateErr.message}`);
     } else {
-      console.log(`[DEBUG] Creating completely new bot entry...`);
-
-      // INSERT LOGIC
-      const botInfoPayload = {
-        name: botName,
-        access_token: credentials,
-        status: {
-          state: "LOGGED_IN",
-          message: "Đăng nhập thành công (Token)",
-          last_update: now,
-        },
-        is_active: true,
-        last_active_at: now,
-      };
-
-      // Try Insert Info
-      let { data: newInfo, error: infoErr } = await supabase
+      // Create new info
+      console.log(`[DB] Creating NEW Bot Info...`);
+      const { data: newInfo, error: insertErr } = await supabase
         .from("zalo_bot_info")
         .insert(botInfoPayload)
-        .select()
+        .select("id")
         .single();
 
-      // Retry without last_active_at if column missing
-      if (infoErr && infoErr.message.includes("last_active_at")) {
-        console.warn(
-          "[DEBUG] Retrying insert without last_active_at column...",
-        );
-        delete (botInfoPayload as any).last_active_at;
-        const retryRes = await supabase
-          .from("zalo_bot_info")
-          .insert(botInfoPayload)
-          .select()
+      if (insertErr)
+        throw new Error(`Insert Info Failed: ${insertErr.message}`);
+      botInfoIdToUpsert = newInfo.id;
+    }
+
+    // B. Handle Identity (The UI Representation)
+    const identityPayload = {
+      zalo_global_id: globalId,
+      display_name: botName,
+      avatar: botAvatar,
+      type: "system_bot",
+      ref_bot_id: botInfoIdToUpsert,
+      updated_at: now,
+    };
+
+    if (existingBot) {
+      // Update existing identity
+      console.log(`[DB] Updating existing Identity: ${existingBot.id}`);
+      await supabase
+        .from("zalo_identities")
+        .update(identityPayload)
+        .eq("id", existingBot.id);
+      finalBotId = existingBot.id;
+    } else {
+      // New Identity (or upgrade from Temp)
+      if (tempBotId) {
+        // Check if tempBot is valid to upgrade
+        const { data: tempCheck } = await supabase
+          .from("zalo_identities")
+          .select("id")
+          .eq("id", tempBotId)
           .single();
-        newInfo = retryRes.data;
-        infoErr = retryRes.error;
+        if (tempCheck) {
+          console.log(`[DB] Upgrading Temp Identity: ${tempBotId}`);
+          await supabase
+            .from("zalo_identities")
+            .update(identityPayload)
+            .eq("id", tempBotId);
+          finalBotId = tempBotId;
+        }
       }
 
-      if (infoErr) {
-        console.error("[DEBUG] Error inserting zalo_bot_info:", infoErr);
-        return {
-          success: false,
-          error: "DB Error (Bot Info): " + infoErr.message,
-        };
-      }
-
-      if (newInfo) {
-        console.log(`[DEBUG] Created Bot Info ID: ${newInfo.id}`);
+      // If still no finalBotId (new bot, no temp), Insert new
+      if (!finalBotId) {
+        console.log(`[DB] Inserting NEW Identity...`);
         const { data: newIdentity, error: idErr } = await supabase
           .from("zalo_identities")
-          .insert({
-            zalo_global_id: globalId,
-            type: "system_bot",
-            display_name: botName,
-            name: botName,
-            avatar: botAvatar,
-            ref_bot_id: newInfo.id,
-          })
-          .select()
+          .insert(identityPayload)
+          .select("id")
           .single();
-
-        if (idErr) {
-          console.error("[DEBUG] Error inserting zalo_identities:", idErr);
-          // Cleanup orphaned bot info
-          await supabase.from("zalo_bot_info").delete().eq("id", newInfo.id);
-          return {
-            success: false,
-            error: "DB Error (Identity): " + idErr.message,
-          };
-        }
-
-        if (newIdentity) {
-          console.log(`[DEBUG] Created Identity ID: ${newIdentity.id}`);
-          finalBotId = newIdentity.id;
-        }
+        if (idErr) throw new Error(`Insert Identity Failed: ${idErr.message}`);
+        finalBotId = newIdentity.id;
       }
     }
+
+    // C. Cleanup Temp Bot (If we created a new one instead of using temp)
+    if (tempBotId && finalBotId !== tempBotId) {
+      await deleteBotAction(tempBotId);
+    }
+  } catch (dbError: any) {
+    console.error("[DB] Critical Error during Bot Save:", dbError);
+    return {
+      success: false,
+      error: "Database Save Failed: " + dbError.message,
+    };
   }
 
-  // 4. START RUNTIME
+  // 4. Start Runtime
   if (finalBotId) {
     try {
-      console.log(`[DEBUG] Starting Runtime for: ${finalBotId}`);
+      console.log(`[Runtime] Starting Bot: ${finalBotId}`);
       const manager = BotRuntimeManager.getInstance();
+      // Ensure we pass the clean credentials object
       await manager.loginWithCredentials(finalBotId, credentials);
-    } catch (e) {
-      console.error("Runtime start failed:", e);
+    } catch (e: any) {
+      console.error("[Runtime] Start Failed:", e);
+      // Don't return failure here, as DB save was successful. User can retry start.
     }
-  } else {
-    console.error("[DEBUG] CRITICAL: finalBotId is undefined!");
   }
 
   revalidatePath("/bot-manager");
-  const result = { success: true, botId: finalBotId };
-  console.log(`[DEBUG] Returning result:`, result);
-  return result;
+  return { success: true, botId: finalBotId };
 }
 
-// ... (Các hàm còn lại deleteBotAction, stopBotAction... giữ nguyên)
 export async function updateBotTokenAction(
   botId: string,
   tokenJsonString: string,
 ) {
   return await addBotWithTokenAction(tokenJsonString, botId);
 }
-
-export async function deleteBotAction(identityId: string) {
+// [FIXED] ROBUST DELETE ACTION with ID RESOLUTION
+export async function deleteBotAction(inputId: string) {
   await requireAdmin();
+  console.log(
+    `[DeleteBot] ---------------------------------------------------`,
+  );
+  console.log(`[DeleteBot] 🗑️ REQUEST DELETE for ID: ${inputId}`);
+
   try {
+    // 1. SMART ID RESOLUTION
+    const resolved = await resolveIdentityId(inputId);
+    if (!resolved) {
+      console.error(`[DeleteBot] ❌ Bot not found in DB (ID: ${inputId})`);
+      return { success: false, error: "Bot not found (Check ID)" };
+    }
+
+    const { identityId, botInfoId } = resolved;
+    console.log(`[DeleteBot] 🎯 Resolved Identity ID: ${identityId}`);
+
+    // 2. Stop Runtime
     try {
+      console.log(`[DeleteBot] Stopping runtime...`);
       BotRuntimeManager.getInstance().stopBot(identityId);
-    } catch (e) {}
-    const { data: identity } = await supabase
-      .from("zalo_identities")
-      .select("id, ref_bot_id")
-      .eq("id", identityId)
-      .single();
-    if (!identity) return { success: false, error: "Bot not found" };
-    const botInfoId = identity.ref_bot_id;
+    } catch (e) {
+      console.warn(`[DeleteBot] Runtime stop warning (Ignored):`, e);
+    }
+
+    // 3. Clean Related Data
+    console.log(`[DeleteBot] Cleaning Related Data...`);
+
+    // Private Conversations
+    const { data: botMemberships } = await supabase
+      .from("conversation_members")
+      .select("conversation_id")
+      .eq("identity_id", identityId);
+
+    if (botMemberships && botMemberships.length > 0) {
+      const convIds = botMemberships.map((m) => m.conversation_id);
+      const { data: privateConvs } = await supabase
+        .from("conversations")
+        .select("id")
+        .in("id", convIds)
+        .eq("type", "private");
+
+      if (privateConvs && privateConvs.length > 0) {
+        const idsToDelete = privateConvs.map((c) => c.id);
+        await supabase
+          .from("messages")
+          .delete()
+          .in("conversation_id", idsToDelete);
+        await supabase
+          .from("conversation_members")
+          .delete()
+          .in("conversation_id", idsToDelete);
+        await supabase.from("conversations").delete().in("id", idsToDelete);
+        console.log(
+          `[DeleteBot]    ✅ Deleted ${idsToDelete.length} Private Convs.`,
+        );
+      }
+    }
+
     await supabase
       .from("messages")
       .delete()
@@ -434,22 +468,33 @@ export async function deleteBotAction(identityId: string) {
       .from("zalo_connections")
       .delete()
       .eq("target_id", identityId);
-    if (botInfoId)
+
+    if (botInfoId) {
       await supabase
         .from("staff_bot_permissions")
         .delete()
         .eq("bot_id", botInfoId);
-    const { error: idError } = await supabase
-      .from("zalo_identities")
-      .delete()
-      .eq("id", identityId);
-    if (idError) throw idError;
-    if (botInfoId)
+    }
+
+    // 4. Delete Identity
+    console.log(`[DeleteBot] Deleting Identity...`);
+    await supabase.from("zalo_identities").delete().eq("id", identityId);
+
+    // 5. Delete Bot Info
+    if (botInfoId) {
+      console.log(`[DeleteBot] Deleting Bot Info...`);
       await supabase.from("zalo_bot_info").delete().eq("id", botInfoId);
+    }
+
+    console.log(`[DeleteBot] ✅ DELETE SUCCESS.`);
     revalidatePath("/bot-manager");
     return { success: true };
   } catch (e: any) {
-    return { success: false, error: e.message };
+    console.error(`[DeleteBot] 🛑 CRITICAL FAILURE:`, e);
+    return {
+      success: false,
+      error: e.message || "Unknown error during deletion",
+    };
   }
 }
 

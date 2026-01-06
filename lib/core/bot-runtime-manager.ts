@@ -1,9 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/core/bot-runtime-manager.ts
- * [FIXED V10.0] ROBUST LISTENER SETUP
- * - Fixed "The listener argument must be of type function" error.
- * - Added safe check for listener existence.
+ * [UPDATED V10.7] FIX DATA MAPPING & QR LOGIN FLOW
+ * - Fixed: Handle nested 'profile' object in Zalo API response.
+ * - Fixed: Fallback fetch for botInfoId in handleLoginSuccess to prevent QR login failure.
  */
 
 import { Zalo, API } from "zca-js";
@@ -44,7 +44,7 @@ export class BotRuntimeManager {
   private healthCheckTimer: NodeJS.Timeout | null = null;
 
   private constructor() {
-    console.log("[BotManager] 🚀 Initializing Engine V10.0...");
+    console.log("[BotManager] 🚀 Initializing Engine V10.7 (Fix Mapping)...");
     this.messagePipeline = new MessagePipeline();
     this.initSystem();
   }
@@ -72,15 +72,10 @@ export class BotRuntimeManager {
   }
 
   // --- HELPER: Extract Credentials Manually ---
-  // [NEW] Thay thế cho getCredentials()
   private extractCredentials(api: any, zaloInstance: any): ZaloCredentials {
-    // 1. Lấy context từ API (thường chứa imei, userAgent, encrypt keys)
     const context = api.getContext ? api.getContext() : {};
-
-    // 2. Lấy cookie từ API (hoặc fallback sang instance)
     const cookie = api.getCookie ? api.getCookie() : zaloInstance.cookie || {};
 
-    // 3. Construct Credentials Object
     return {
       cookie: cookie,
       imei: context.imei || zaloInstance.imei || "",
@@ -129,6 +124,7 @@ export class BotRuntimeManager {
   public async startLoginQR(botId: string) {
     const runtime = this.getOrInitBot(botId);
 
+    // Initial check for botInfoId
     if (!runtime.botInfoId) {
       const { data } = await supabase
         .from("zalo_identities")
@@ -186,7 +182,6 @@ export class BotRuntimeManager {
         message: "Đăng nhập thành công!",
       });
 
-      // [FIX] Use manual extraction
       const credentials = this.extractCredentials(api, runtime.instance);
       await this.handleLoginSuccess(botId, api, credentials);
     } catch (e: any) {
@@ -255,7 +250,6 @@ export class BotRuntimeManager {
       runtime.instance = new Zalo(options);
       const api = await runtime.instance.login(finalCreds);
 
-      // [FIX] Use manual extraction instead of getCredentials
       const updatedCreds = this.extractCredentials(api, runtime.instance);
 
       if (runtime.currentProxy) {
@@ -276,47 +270,107 @@ export class BotRuntimeManager {
     }
   }
 
+  // --- CORE LOGIC: HANDLE LOGIN SUCCESS & SYNC DB ---
   private async handleLoginSuccess(botId: string, api: API, credentials: any) {
     const runtime = this.bots.get(botId);
-    if (!runtime || !runtime.botInfoId) return;
+
+    // [FIX] Fallback: Nếu runtime thiếu botInfoId, thử fetch lại từ DB một lần nữa
+    // Điều này giải quyết lỗi QR Login khi runtime bị reset hoặc chưa init kịp
+    if (runtime && !runtime.botInfoId) {
+      console.warn(
+        `[Login] Warning: BotInfoID missing for ${botId}. Retrying fetch from DB...`,
+      );
+      const { data } = await supabase
+        .from("zalo_identities")
+        .select("ref_bot_id")
+        .eq("id", botId)
+        .single();
+      if (data?.ref_bot_id) {
+        runtime.botInfoId = data.ref_bot_id;
+        console.log(`[Login] Resolved BotInfoID: ${runtime.botInfoId}`);
+      }
+    }
+
+    if (!runtime || !runtime.botInfoId) {
+      console.error(
+        `[Login] CRITICAL: Runtime or BotInfoID still missing for ${botId}. Cannot persist session.`,
+      );
+      return;
+    }
 
     runtime.api = api;
     runtime.status = "LOGGED_IN";
 
-    // Lấy Profile để cập nhật ID thật
+    // 1. Fetch Profile từ Zalo API
     try {
-      const info: any = await api.fetchAccountInfo();
-      const realZaloId = info.id || info.uid || api.getOwnId();
+      console.log(`[Login] Fetching Account Info via API...`);
+      const rawInfo: any = await api.fetchAccountInfo();
 
+      // [DEBUG] Log Raw Info để kiểm tra cấu trúc
+      console.log(
+        `[Login] RAW Account Info:`,
+        JSON.stringify(rawInfo, null, 2),
+      );
+
+      // [FIX] Normalize Data Source (Unwrap 'profile' or 'data')
+      let source = rawInfo;
+      if (rawInfo && rawInfo.data) source = rawInfo.data;
+      else if (rawInfo && rawInfo.profile) source = rawInfo.profile;
+
+      // 2. Map Data an toàn
+      const realZaloId =
+        source.id || source.uid || source.userId || api.getOwnId();
+
+      // Ưu tiên displayName -> name -> zaloName -> username
       const displayName =
-        info.display_name || info.name || info.zalo_name || "Unknown Bot";
-      const avatar = info.avatar || "";
+        source.displayName ||
+        source.display_name ||
+        source.name ||
+        source.zaloName ||
+        source.zalo_name ||
+        source.username ||
+        "Unknown Bot";
 
-      console.log(`[Login] Bot Identified: ${displayName} (${realZaloId})`);
+      const avatar = source.avatar || source.avt || "";
 
+      console.log(
+        `[Login] Mapped Profile: Name="${displayName}", ID="${realZaloId}"`,
+      );
+
+      // 3. Update Database (Identities)
       if (realZaloId && realZaloId !== "0") {
-        // Cập nhật Zalo Global ID thật vào DB
+        const identityUpdatePayload: any = {
+          zalo_global_id: String(realZaloId), // Ensure string
+          display_name: displayName,
+          avatar: avatar,
+          updated_at: new Date().toISOString(),
+        };
+
+        // [SAFETY] Double check: Xóa trường 'name'
+        delete identityUpdatePayload.name;
+
+        console.log("[Login] Syncing Identity...");
         const { error } = await supabase
           .from("zalo_identities")
-          .update({
-            zalo_global_id: realZaloId,
-            display_name: displayName,
-            name: displayName,
-            avatar: avatar,
-            updated_at: new Date().toISOString(),
-          })
+          .update(identityUpdatePayload)
           .eq("id", botId);
 
-        if (error) console.error("[Login] DB Update Identity Error:", error);
+        if (error) console.error("[Login] ❌ DB Update Identity Error:", error);
+      } else {
+        console.warn(
+          "[Login] ⚠️ Could not determine Real Zalo ID. Skipping Identity Update.",
+        );
       }
     } catch (e) {
-      console.warn("[Login] Fetch Profile Warning:", e);
+      console.warn("[Login] ⚠️ Fetch Profile Warning:", e);
     }
 
+    // 4. Update Database (Bot Info) - Lưu Session
+    console.log(`[Login] Saving Session & Status...`);
     await supabase
       .from("zalo_bot_info")
       .update({
-        access_token: credentials,
+        access_token: credentials, // Lưu credentials mới nhất
         status: {
           state: "LOGGED_IN",
           message: "Đang hoạt động",
@@ -328,17 +382,16 @@ export class BotRuntimeManager {
       })
       .eq("id", runtime.botInfoId);
 
+    // 5. Start Listener
     this.setupMessageListener(botId, api);
-    console.log(`[BotManager] ${botId} is Online & Listening.`);
+    console.log(`[BotManager] 🎉 ${botId} is Online & Listening.`);
   }
 
   private setupMessageListener(botId: string, api: API) {
     const rawApi = api as any;
 
-    // [FIX] Safer listener cleanup
     try {
       if (rawApi.listener) {
-        // Remove all listeners for 'message' event safely
         rawApi.listener.removeAllListeners("message");
         rawApi.listener.removeAllListeners("error");
       }
@@ -346,20 +399,23 @@ export class BotRuntimeManager {
       console.warn("[Runtime] Cleanup listener warning:", e);
     }
 
-    // Attach new listeners
     if (rawApi.listener) {
+      console.log(`[BotManager] Attaching Message Listener for ${botId}...`);
+
       rawApi.listener.on("message", async (message: any) => {
         this.updateHeartbeat(botId);
         await this.messagePipeline.process(botId, message);
       });
+
       rawApi.listener.on("error", (err: any) => {
         console.error(`[Socket] Error ${botId}:`, err);
       });
 
-      // Start if method exists
       if (typeof rawApi.listener.start === "function") {
         rawApi.listener.start();
       }
+    } else {
+      console.warn(`[BotManager] ⚠️ API object has no listener!`);
     }
   }
 
@@ -418,7 +474,7 @@ export class BotRuntimeManager {
   public getBotAPI(botId: string) {
     const runtime = this.bots.get(botId);
     if (!runtime || !runtime.api)
-      throw new Error("Bot chưa sẵn sàng (Offline)");
+      throw new Error(`Bot connection not found for ID: ${botId}`);
     return runtime.api;
   }
 

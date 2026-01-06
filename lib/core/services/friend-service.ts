@@ -19,8 +19,7 @@ export class FriendService {
   static async upsertIdentity(
     zaloId: string,
     data: any,
-    type: "user" | "stranger" | "system_bot" = "user",
-    isFriend: boolean = false,
+    type: "user" | "system_bot" = "user",
   ) {
     if (!zaloId) return null;
 
@@ -33,10 +32,10 @@ export class FriendService {
       .upsert(
         {
           zalo_global_id: zaloId,
-          name: displayName,
+          display_name: displayName, // Map name -> display_name
           avatar: avatar,
           type: type, // Trong V6 ưu tiên dùng 'user' cho mọi người dùng
-          is_friend: isFriend,
+
           raw_data: data,
           updated_at: new Date().toISOString(),
         },
@@ -93,6 +92,7 @@ export class FriendService {
         target_id: userId,
         external_uid: userZaloId,
         relationship_data: {
+          is_friend: type === "friend", // Map type -> is_friend boolean
           type,
           ...metadata,
           synced_at: new Date().toISOString(),

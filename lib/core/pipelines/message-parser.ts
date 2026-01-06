@@ -10,6 +10,7 @@ import {
   NormalizedContent,
   RawZaloMessage,
 } from "@/lib/types/zalo.types";
+import supabase from "@/lib/supabaseServer";
 
 export class MessageParser {
   public parse(rawMsg: RawZaloMessage): StandardMessage | null {
