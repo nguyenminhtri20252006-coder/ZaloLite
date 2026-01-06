@@ -20,19 +20,18 @@ import {
   updateBotTokenAction,
   toggleRealtimeAction,
   syncBotDataAction,
+  deleteBotAction, // [FIX] Import thêm deleteBotAction
 } from "@/lib/actions/bot.actions";
 import { useZaloBotsRealtime } from "@/lib/hooks/useZaloBotsRealtime";
 import { BotDetailTabs } from "./BotDetailTabs";
 import { LoginPanel } from "./LoginPanel";
 import { BotListPanel } from "./BotListPanel";
-import { Zap, Power } from "lucide-react"; // Import Lucide Icons
+import { Zap, Power } from "lucide-react";
 
-// HealthLog Component
+// HealthLog Component giữ nguyên
 const HealthLog = ({ log }: { log?: ZaloBot["health_check_log"] }) => {
   if (!log) return null;
-  // [FIX] Type Casting for JSONB field
   const logData = log as any;
-
   const isOk = logData.status === "OK";
   const date = logData.timestamp
     ? new Date(logData.timestamp).toLocaleTimeString()
@@ -77,7 +76,7 @@ export function BotManagerPanel({
   onStartLogin,
   activeQrBotId,
   setActiveQrBotId,
-  qrCodeData,
+  qrCodeData: propQrCodeData,
   userRole,
 }: {
   bots: ZaloBot[];
@@ -96,11 +95,9 @@ export function BotManagerPanel({
   const [showAddModal, setShowAddModal] = useState(false);
   const [reLoginBot, setReLoginBot] = useState<ZaloBot | null>(null);
 
-  // States for Actions
   const [isTogglingRealtime, setIsTogglingRealtime] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
-  // Login Shared State
   const [loginMethod, setLoginMethod] = useState<"qr" | "token">("qr");
   const [tokenInput, setTokenInput] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
@@ -112,17 +109,12 @@ export function BotManagerPanel({
   const isAdmin = userRole === "admin";
   const selectedBot = bots.find((b) => b.id === selectedBotId) || null;
 
-  // --- HANDLERS (LOGIC MỚI) ---
-
+  // Handlers giữ nguyên
   const handleToggleRealtime = async (botId: string, currentState: boolean) => {
     setIsTogglingRealtime(true);
     try {
       const res = await toggleRealtimeAction(botId, !currentState);
-      if (res.success) {
-        // onRefresh(); // Realtime hook will update UI
-      } else {
-        alert(res.error);
-      }
+      if (res && !res.success) alert(res.error); // Check res exist
     } catch (e: any) {
       alert(e.message);
     } finally {
@@ -131,11 +123,7 @@ export function BotManagerPanel({
   };
 
   const handleManualSync = async (botId: string) => {
-    if (
-      confirm(
-        "Đồng bộ toàn bộ dữ liệu (Bạn bè, Nhóm)? Quá trình này có thể mất vài phút.",
-      )
-    ) {
+    if (confirm("Đồng bộ toàn bộ dữ liệu?")) {
       setIsSyncing(true);
       try {
         const res = await syncBotDataAction(botId);
@@ -158,7 +146,7 @@ export function BotManagerPanel({
   };
 
   const handleStopBot = async (botId: string, botName: string) => {
-    if (!confirm(`Bạn có chắc chắn muốn dừng Bot "${botName}"?`)) return;
+    if (!confirm(`Dừng Bot "${botName}"?`)) return;
     setIsProcessing(true);
     try {
       await stopBotAction(botId);
@@ -170,14 +158,26 @@ export function BotManagerPanel({
     }
   };
 
-  // --- ADD BOT FLOW ---
+  // ADD BOT FLOW (QR)
   const handleStartLoginQR_Add = async () => {
     setIsProcessing(true);
     setLoginState("LOGGING_IN");
+
     try {
       const newBot = await createPlaceholderBotAction();
       setTempBotId(newBot.id);
-      await onStartLogin(newBot.id);
+      setActiveQrBotId(newBot.id);
+
+      // Chờ 1.5s để Client kịp kết nối SSE tới Server
+      console.log("Waiting for SSE connection...");
+      setTimeout(async () => {
+        try {
+          await onStartLogin(newBot.id);
+        } catch (e) {
+          console.error(e);
+          alert("Lỗi gọi API Login");
+        }
+      }, 1500);
     } catch (e) {
       alert("Lỗi: " + String(e));
       setLoginState("ERROR");
@@ -185,50 +185,67 @@ export function BotManagerPanel({
     }
   };
 
+  // [FIX CRITICAL] ADD BOT FLOW (TOKEN)
   const handleStartLoginToken_Add = async () => {
     setIsProcessing(true);
     try {
-      // [UPDATE] Gọi hàm Add Bot có xử lý Merge
-      const res = await addBotWithTokenAction(
+      console.log("[Client] Calling addBotWithTokenAction...");
+      // Gọi action và ép kiểu any để truy cập property thoải mái (hoặc define interface response)
+      const res: any = await addBotWithTokenAction(
         tokenInput,
         tempBotId || undefined,
       );
-      if (res.success && res.botId) {
+
+      console.log("[Client] Response:", res);
+
+      if (res.success) {
         setShowAddModal(false);
-        alert("Thêm/Cập nhật Bot thành công!");
-        // [AUTO-SELECT] Chuyển ngay sang Bot vừa thêm/merge
-        setSelectedBotId(res.botId);
+        // Bây giờ truy cập res.botId sẽ không bị lỗi TypeScript
+        if (res.botId) {
+          alert(`Thêm/Cập nhật Bot thành công! (ID: ${res.botId})`);
+          setSelectedBotId(res.botId);
+        } else {
+          alert(
+            "Thêm bot thành công nhưng không lấy được ID trả về (Vui lòng refresh).",
+          );
+        }
+
+        resetLoginState();
       } else {
-        alert(res.error);
+        // Truy cập res.error an toàn
+        alert(res.error || "Có lỗi xảy ra từ Server (Không rõ nguyên nhân).");
         setLoginState("ERROR");
       }
-    } catch (e) {
-      alert("Lỗi: " + String(e));
+    } catch (e: any) {
+      console.error("[Client] Error:", e);
+      alert("Lỗi Client: " + (e.message || String(e)));
       setLoginState("ERROR");
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // --- RE-LOGIN FLOW ---
   const handleReLoginQR = async () => {
     if (!reLoginBot) return;
     setIsProcessing(true);
     setLoginState("LOGGING_IN");
-    try {
-      await onStartLogin(reLoginBot.id);
-    } catch (e) {
-      alert("Lỗi: " + String(e));
-      setLoginState("ERROR");
-      setIsProcessing(false);
-    }
+    setActiveQrBotId(reLoginBot.id);
+    setTimeout(async () => {
+      try {
+        await onStartLogin(reLoginBot.id);
+      } catch (e) {
+        alert("Lỗi: " + String(e));
+        setLoginState("ERROR");
+        setIsProcessing(false);
+      }
+    }, 1500);
   };
 
   const handleUpdateToken = async () => {
     if (!reLoginBot) return;
     setIsProcessing(true);
     try {
-      const res = await updateBotTokenAction(reLoginBot.id, tokenInput);
+      const res: any = await updateBotTokenAction(reLoginBot.id, tokenInput);
       if (res.success) {
         alert("Cập nhật thành công!");
         setReLoginBot(null);
@@ -261,21 +278,21 @@ export function BotManagerPanel({
     }
   };
 
-  // Effects
+  // Auto-close modal
   const tempBot = bots.find((b) => b.id === tempBotId);
-  if (showAddModal && tempBot && tempBot.status?.state === "LOGGED_IN") {
+  // [FIX] Chỉ đóng modal nếu loginState là LOGGING_IN (tránh đóng sớm khi vừa tạo placeholder)
+  if (
+    showAddModal &&
+    tempBot &&
+    tempBot.status?.state === "LOGGED_IN" &&
+    loginState === "LOGGING_IN"
+  ) {
     setShowAddModal(false);
     resetLoginState();
-    // Auto select temp bot if login success via QR
     if (tempBotId) setSelectedBotId(tempBotId);
   }
 
-  const currentQrCode =
-    tempBotId === activeQrBotId || reLoginBot?.id === activeQrBotId
-      ? qrCodeData
-      : null;
-
-  // Render Modal (Login/Re-login) logic... (Same as before)
+  // --- RENDER ---
   const renderReLoginModal = () => {
     if (!reLoginBot) return null;
     const isQRMode = activeQrBotId === reLoginBot.id;
@@ -355,56 +372,28 @@ export function BotManagerPanel({
                 </button>
               </div>
             )}
-            {isQRMode && (
-              <div className="flex flex-col items-center justify-center py-4">
-                {qrCodeData ? (
-                  <div className="bg-white p-3 rounded-xl shadow-lg mb-4">
-                    <img
-                      src={qrCodeData}
-                      alt="QR"
-                      className="w-48 h-48 object-contain"
-                    />
-                  </div>
-                ) : (
-                  <div className="w-48 h-48 flex items-center justify-center bg-gray-700/30 rounded-xl mb-4">
-                    <IconRefresh className="w-8 h-8 animate-spin" />
-                  </div>
+            {(isQRMode || loginMethod === "token") && (
+              <LoginPanel
+                loginState={loginState}
+                loginMethod={isQRMode ? "qr" : "token"}
+                qrCode={null}
+                isSending={isProcessing}
+                tokenInput={tokenInput}
+                onLoginMethodChange={setLoginMethod}
+                onTokenChange={setTokenInput}
+                onStartLoginQR={handleReLoginQR}
+                onStartLoginToken={handleUpdateToken}
+                mode="relogin"
+                botName={reLoginBot.name}
+                onRetrySavedToken={handleRetrySavedToken}
+                activeBotId={reLoginBot.id}
+                renderStatus={() => (
+                  <span className="text-xs font-mono text-gray-400">
+                    Status: {reLoginBot.status?.state || loginState} -{" "}
+                    {reLoginBot.status?.message}
+                  </span>
                 )}
-                <button
-                  onClick={() => {
-                    setActiveQrBotId(null);
-                    setLoginMethod("qr");
-                  }}
-                  className="mt-6 text-xs text-red-400 hover:underline"
-                >
-                  Hủy bỏ
-                </button>
-              </div>
-            )}
-            {loginMethod === "token" && !isQRMode && (
-              <div className="mt-2 p-4 bg-gray-900/50 rounded-lg border border-gray-700">
-                <textarea
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  className="w-full bg-black/30 border border-gray-600 rounded p-3 text-xs font-mono text-green-400 min-h-[100px] mb-4"
-                  placeholder='{"cookie":..., "imei":...}'
-                />
-                <div className="flex justify-end gap-2">
-                  <button
-                    onClick={() => setLoginMethod("qr")}
-                    className="px-3 py-2 text-xs text-gray-400"
-                  >
-                    Hủy
-                  </button>
-                  <button
-                    onClick={handleUpdateToken}
-                    disabled={!tokenInput || isProcessing}
-                    className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs font-bold disabled:opacity-50"
-                  >
-                    {isProcessing ? "..." : "Cập nhật"}
-                  </button>
-                </div>
-              </div>
+              />
             )}
           </div>
         </div>
@@ -412,7 +401,6 @@ export function BotManagerPanel({
     );
   };
 
-  // --- RENDER MAIN ---
   return (
     <div className="flex h-full w-full bg-gray-900 text-gray-100 overflow-hidden">
       {/* LEFT: LIST PANEL */}
@@ -456,7 +444,6 @@ export function BotManagerPanel({
       <div className="flex-1 flex flex-col overflow-hidden bg-gray-900">
         {selectedBotId && selectedBot ? (
           <div className="flex flex-col h-full animate-fade-in">
-            {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-800 bg-gray-900 shrink-0">
               <div className="flex items-center gap-4">
                 <Avatar
@@ -487,9 +474,7 @@ export function BotManagerPanel({
                   </div>
                 </div>
               </div>
-
               <div className="flex items-center gap-3">
-                {/* Realtime Toggle */}
                 {selectedBot.status?.state === "LOGGED_IN" && (
                   <div className="flex items-center gap-2 bg-gray-800 rounded-full px-3 py-1.5 border border-gray-700">
                     <span
@@ -527,22 +512,16 @@ export function BotManagerPanel({
                     </button>
                   </div>
                 )}
-
-                {/* Manual Sync */}
                 <button
                   onClick={() => handleManualSync(selectedBot.id)}
                   disabled={isSyncing}
                   className="p-2 hover:bg-gray-800 rounded-full text-gray-400 hover:text-white transition-colors"
-                  title="Đồng bộ dữ liệu ngay"
                 >
                   <IconRefresh
                     className={`w-5 h-5 ${isSyncing ? "animate-spin" : ""}`}
                   />
                 </button>
-
                 <div className="h-6 w-px bg-gray-700 mx-1"></div>
-
-                {/* Actions */}
                 {selectedBot.status?.state === "LOGGED_IN" ? (
                   <button
                     onClick={() =>
@@ -564,7 +543,6 @@ export function BotManagerPanel({
                     Đăng nhập lại
                   </button>
                 )}
-
                 {isAdmin && (
                   <button
                     onClick={async () => {
@@ -580,8 +558,6 @@ export function BotManagerPanel({
                 )}
               </div>
             </div>
-
-            {/* Content */}
             <div className="flex-1 overflow-y-auto p-6 scrollbar-thin">
               <div className="mb-6">
                 <div className="flex items-center gap-2 mb-2 text-gray-400 text-xs font-bold uppercase tracking-wider">
@@ -602,7 +578,6 @@ export function BotManagerPanel({
         )}
       </div>
 
-      {/* MODALS */}
       {showAddModal && isAdmin && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-gray-800 border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-up max-h-[90vh] flex flex-col">
@@ -619,22 +594,30 @@ export function BotManagerPanel({
               <LoginPanel
                 loginState={loginState}
                 loginMethod={loginMethod}
-                qrCode={currentQrCode}
+                qrCode={null}
                 isSending={isProcessing}
                 tokenInput={tokenInput}
                 onLoginMethodChange={setLoginMethod}
                 onTokenChange={setTokenInput}
                 onStartLoginQR={handleStartLoginQR_Add}
                 onStartLoginToken={handleStartLoginToken_Add}
-                renderStatus={() => (
-                  <span
-                    className={`text-xs font-mono ${
-                      loginState === "ERROR" ? "text-red-400" : "text-gray-400"
-                    }`}
-                  >
-                    Status: {loginState}
-                  </span>
-                )}
+                activeBotId={tempBotId}
+                renderStatus={() => {
+                  const tBot = bots.find((b) => b.id === tempBotId);
+                  const statusMsg = tBot?.status?.message || loginState;
+                  const statusState = tBot?.status?.state || "UNKNOWN";
+                  return (
+                    <span
+                      className={`text-xs font-mono ${
+                        statusState === "ERROR"
+                          ? "text-red-400"
+                          : "text-gray-400"
+                      }`}
+                    >
+                      Status: {statusState} - {statusMsg}
+                    </span>
+                  );
+                }}
               />
             </div>
           </div>

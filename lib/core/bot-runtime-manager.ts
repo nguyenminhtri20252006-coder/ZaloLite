@@ -1,17 +1,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/core/bot-runtime-manager.ts
- * [REFACTORED V8.4 - FIX QR LOGIN & CONSTRUCTOR]
- * - Reverted to 'loginQR' method (Standard ZCA).
- * - Fixed Zalo constructor arguments.
- * - Removed manual API instantiation.
+ * [FIXED V10.0] ROBUST LISTENER SETUP
+ * - Fixed "The listener argument must be of type function" error.
+ * - Added safe check for listener existence.
  */
 
 import { Zalo, API } from "zca-js";
 import { HttpProxyAgent } from "http-proxy-agent";
 import supabase from "@/lib/supabaseServer";
 import { MessagePipeline } from "./pipelines/message-pipeline";
-import { ZaloBotStatus, HealthCheckLog } from "@/lib/types/database.types";
+import { ZaloBotStatus } from "@/lib/types/database.types";
+import { sseManager } from "@/lib/core/sse-manager";
 
 interface ZaloCredentials {
   imei: string;
@@ -24,7 +24,7 @@ interface ZaloCredentials {
 }
 
 type BotRuntime = {
-  instance: any; // Use any to interact with Zalo class freely
+  instance: any;
   api: API | null;
   status: ZaloBotStatus["state"];
   pollingInterval?: NodeJS.Timeout;
@@ -44,7 +44,7 @@ export class BotRuntimeManager {
   private healthCheckTimer: NodeJS.Timeout | null = null;
 
   private constructor() {
-    console.log("[BotManager] 🚀 Initializing Engine V8.4...");
+    console.log("[BotManager] 🚀 Initializing Engine V10.0...");
     this.messagePipeline = new MessagePipeline();
     this.initSystem();
   }
@@ -59,7 +59,6 @@ export class BotRuntimeManager {
 
   private async initSystem() {
     try {
-      // Reset statuses
       await supabase
         .from("zalo_bot_info")
         .update({
@@ -72,9 +71,25 @@ export class BotRuntimeManager {
     this.startHealthCheckLoop();
   }
 
-  // ===========================================================================
-  // 1. INSTANCE MANAGEMENT
-  // ===========================================================================
+  // --- HELPER: Extract Credentials Manually ---
+  // [NEW] Thay thế cho getCredentials()
+  private extractCredentials(api: any, zaloInstance: any): ZaloCredentials {
+    // 1. Lấy context từ API (thường chứa imei, userAgent, encrypt keys)
+    const context = api.getContext ? api.getContext() : {};
+
+    // 2. Lấy cookie từ API (hoặc fallback sang instance)
+    const cookie = api.getCookie ? api.getCookie() : zaloInstance.cookie || {};
+
+    // 3. Construct Credentials Object
+    return {
+      cookie: cookie,
+      imei: context.imei || zaloInstance.imei || "",
+      userAgent: context.userAgent || zaloInstance.userAgent || "",
+      zpw_enk: context.zpw_enk || zaloInstance.zpw_enk,
+      zpw_service_token: context.zpw_service_token,
+      session_key: context.session_key,
+    };
+  }
 
   public getOrInitBot(botId: string, proxyUrl?: string): BotRuntime {
     let runtime = this.bots.get(botId);
@@ -84,6 +99,8 @@ export class BotRuntimeManager {
 
       const zaloOptions: any = {
         selfListen: true,
+        checkUpdate: false,
+        logging: false,
       };
 
       if (proxyUrl && proxyUrl.trim() !== "") {
@@ -94,7 +111,6 @@ export class BotRuntimeManager {
         }
       }
 
-      // [FIX] Constructor takes 1 argument: options
       const instance = new Zalo(zaloOptions);
 
       runtime = {
@@ -110,10 +126,6 @@ export class BotRuntimeManager {
     return runtime;
   }
 
-  // ===========================================================================
-  // 2. LOGIN FLOW: QR CODE (STANDARD LOGIN_QR)
-  // ===========================================================================
-
   public async startLoginQR(botId: string) {
     const runtime = this.getOrInitBot(botId);
 
@@ -126,70 +138,72 @@ export class BotRuntimeManager {
       if (data?.ref_bot_id) runtime.botInfoId = data.ref_bot_id;
     }
 
-    if (!runtime.botInfoId) throw new Error("Bot Info ID not found in DB");
-
     try {
-      await this.updateBotStatusInDB(
-        runtime.botInfoId,
-        "STARTING",
-        "Đang khởi tạo QR...",
-      );
+      console.log(`[QR-Logic] Starting QR login for botId: ${botId}`);
+      sseManager.sendEvent(botId, "status", {
+        message: "Đang kết nối tới Zalo...",
+      });
+
+      if (runtime.botInfoId) {
+        await this.updateBotStatusInDB(
+          runtime.botInfoId,
+          "STARTING",
+          "Đang kết nối...",
+        );
+      }
       runtime.status = "STARTING";
 
-      // [FIX] Sử dụng loginQR thay vì getQrCode
-      // loginQR sẽ tự handle polling và trả về api khi thành công
-      const api = await runtime.instance.loginQR(
-        {
-          // Có thể truyền thêm params nếu thư viện yêu cầu
-        },
-        async (qrData: any) => {
-          // Callback nhận QR Code
-          console.log(`[QR] Received for ${botId}`);
+      const api = await runtime.instance.loginQR({}, async (event: any) => {
+        let base64 = typeof event === "string" ? event : event.data?.image;
 
-          // Xử lý format base64
-          let base64 =
-            typeof qrData === "string"
-              ? qrData
-              : qrData.data?.image || qrData.image;
-          if (base64 && !base64.startsWith("data:image")) {
+        if (!base64 && typeof event === "object") {
+          base64 = event.image || event.qr;
+          if (Buffer.isBuffer(event)) base64 = event.toString("base64");
+        }
+
+        if (base64) {
+          if (typeof base64 === "string" && !base64.startsWith("data:image")) {
             base64 = `data:image/png;base64,${base64}`;
           }
 
-          // Update DB để Client hiển thị
-          await this.updateBotStatusInDB(
-            runtime.botInfoId!,
-            "QR_WAITING",
-            "Vui lòng quét mã QR",
-            base64,
-          );
+          console.log(`[QR-Logic] QR Extracted! Length: ${base64.length}`);
+          sseManager.sendEvent(botId, "qr", { image: base64 });
+
+          if (runtime.botInfoId) {
+            await this.updateBotStatusInDB(
+              runtime.botInfoId,
+              "QR_WAITING",
+              "Vui lòng quét mã QR",
+              base64,
+            );
+          }
           runtime.status = "QR_WAITING";
-        },
-      );
+        }
+      });
 
-      // Khi await loginQR xong -> Đã đăng nhập thành công
-      console.log(`[QR] Login Success for ${botId}`);
+      console.log(`[QR-Logic] Login Success for ${botId}`);
+      sseManager.sendEvent(botId, "success", {
+        message: "Đăng nhập thành công!",
+      });
 
-      const credentials = runtime.instance.getCredentials();
+      // [FIX] Use manual extraction
+      const credentials = this.extractCredentials(api, runtime.instance);
       await this.handleLoginSuccess(botId, api, credentials);
     } catch (e: any) {
-      console.error(`[QR] Login Error:`, e);
-      await this.updateBotStatusInDB(
-        runtime.botInfoId,
-        "ERROR",
-        e.message || "Lỗi lấy mã QR",
-      );
+      console.error(`[QR-Logic] Login Error:`, e);
+      sseManager.sendEvent(botId, "error", { message: e.message });
+
+      if (runtime.botInfoId) {
+        await this.updateBotStatusInDB(
+          runtime.botInfoId,
+          "ERROR",
+          e.message || "Lỗi lấy mã QR",
+        );
+      }
     }
   }
 
-  // ===========================================================================
-  // 3. LOGIN FLOW: TOKEN (RESTORE)
-  // ===========================================================================
-
-  public async loginWithCredentials(
-    botId: string,
-    credentials: any,
-    autoSyncInterval: number = 0,
-  ) {
+  public async loginWithCredentials(botId: string, credentials: any) {
     const creds = credentials as ZaloCredentials;
     const runtime = this.getOrInitBot(botId, creds.proxy);
 
@@ -211,24 +225,39 @@ export class BotRuntimeManager {
         );
       }
 
-      // [FIX] Merge credentials vào options cho Constructor
+      let cookieData = creds.cookie;
+      if (typeof cookieData === "string" && cookieData.trim().startsWith("{")) {
+        try {
+          cookieData = JSON.parse(cookieData);
+        } catch {}
+      }
+
+      const finalCreds = {
+        cookie: cookieData,
+        imei: creds.imei,
+        userAgent:
+          creds.userAgent ||
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (ZaloPC)",
+        zpw_enk: creds.zpw_enk,
+        session_key: creds.session_key,
+      };
+
       const options = {
-        ...creds,
+        authType: "cookie",
         selfListen: true,
+        checkUpdate: false,
+        logging: false,
         httpAgent: runtime.currentProxy
           ? new HttpProxyAgent(runtime.currentProxy)
           : undefined,
       };
 
-      // Re-create instance with credentials
       runtime.instance = new Zalo(options);
+      const api = await runtime.instance.login(finalCreds);
 
-      // [FIX] Gọi login với credentials (hoặc không tham số nếu constructor đã nhận)
-      // Để an toàn và tương thích nhiều version, truyền lại credentials
-      const api = await runtime.instance.login(creds);
+      // [FIX] Use manual extraction instead of getCredentials
+      const updatedCreds = this.extractCredentials(api, runtime.instance);
 
-      // Lấy credentials mới nhất
-      const updatedCreds = runtime.instance.getCredentials();
       if (runtime.currentProxy) {
         (updatedCreds as any).proxy = runtime.currentProxy;
       }
@@ -240,16 +269,12 @@ export class BotRuntimeManager {
         await this.updateBotStatusInDB(
           runtime.botInfoId,
           "ERROR",
-          "Token lỗi/hết hạn: " + e.message,
+          "Token lỗi: " + e.message,
         );
       }
       throw e;
     }
   }
-
-  // ===========================================================================
-  // 4. HANDLERS
-  // ===========================================================================
 
   private async handleLoginSuccess(botId: string, api: API, credentials: any) {
     const runtime = this.bots.get(botId);
@@ -258,28 +283,36 @@ export class BotRuntimeManager {
     runtime.api = api;
     runtime.status = "LOGGED_IN";
 
-    // 1. Sync Profile (Fallback if fail)
+    // Lấy Profile để cập nhật ID thật
     try {
-      // Dùng any để tránh lỗi type checker
       const info: any = await api.fetchAccountInfo();
+      const realZaloId = info.id || info.uid || api.getOwnId();
+
       const displayName =
         info.display_name || info.name || info.zalo_name || "Unknown Bot";
       const avatar = info.avatar || "";
 
-      await supabase
-        .from("zalo_identities")
-        .update({
-          display_name: displayName,
-          name: displayName,
-          avatar: avatar,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", botId);
+      console.log(`[Login] Bot Identified: ${displayName} (${realZaloId})`);
+
+      if (realZaloId && realZaloId !== "0") {
+        // Cập nhật Zalo Global ID thật vào DB
+        const { error } = await supabase
+          .from("zalo_identities")
+          .update({
+            zalo_global_id: realZaloId,
+            display_name: displayName,
+            name: displayName,
+            avatar: avatar,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", botId);
+
+        if (error) console.error("[Login] DB Update Identity Error:", error);
+      }
     } catch (e) {
       console.warn("[Login] Fetch Profile Warning:", e);
     }
 
-    // 2. Update DB
     await supabase
       .from("zalo_bot_info")
       .update({
@@ -295,30 +328,39 @@ export class BotRuntimeManager {
       })
       .eq("id", runtime.botInfoId);
 
-    // 3. Start Listener
     this.setupMessageListener(botId, api);
-
     console.log(`[BotManager] ${botId} is Online & Listening.`);
   }
 
   private setupMessageListener(botId: string, api: API) {
     const rawApi = api as any;
 
-    if (rawApi.listener) {
-      rawApi.listener.off("message");
-      rawApi.listener.off("error");
+    // [FIX] Safer listener cleanup
+    try {
+      if (rawApi.listener) {
+        // Remove all listeners for 'message' event safely
+        rawApi.listener.removeAllListeners("message");
+        rawApi.listener.removeAllListeners("error");
+      }
+    } catch (e) {
+      console.warn("[Runtime] Cleanup listener warning:", e);
     }
 
-    rawApi.listener.on("message", async (message: any) => {
-      this.updateHeartbeat(botId);
-      await this.messagePipeline.process(botId, message);
-    });
+    // Attach new listeners
+    if (rawApi.listener) {
+      rawApi.listener.on("message", async (message: any) => {
+        this.updateHeartbeat(botId);
+        await this.messagePipeline.process(botId, message);
+      });
+      rawApi.listener.on("error", (err: any) => {
+        console.error(`[Socket] Error ${botId}:`, err);
+      });
 
-    rawApi.listener.on("error", (err: any) => {
-      console.error(`[Socket] Error ${botId}:`, err);
-    });
-
-    rawApi.listener.start();
+      // Start if method exists
+      if (typeof rawApi.listener.start === "function") {
+        rawApi.listener.start();
+      }
+    }
   }
 
   private updateHeartbeat(botId: string) {
@@ -380,45 +422,32 @@ export class BotRuntimeManager {
     return runtime.api;
   }
 
-  // [ADDED] Methods required by bot.actions.ts
   public async startRealtime(botId: string) {
     const runtime = this.bots.get(botId);
     if (!runtime || !runtime.api) throw new Error("Bot chưa đăng nhập");
-
-    console.log(`[Runtime] Start Realtime for ${botId}`);
     (runtime.api as any).listener.start();
-
-    if (runtime.botInfoId) {
+    if (runtime.botInfoId)
       await this.updateBotStatusInDB(runtime.botInfoId, "ACTIVE");
-    }
   }
 
   public async stopRealtime(botId: string) {
     const runtime = this.bots.get(botId);
     if (!runtime || !runtime.api) return;
-
-    console.log(`[Runtime] Stop Realtime for ${botId}`);
     (runtime.api as any).listener.stop();
-
-    if (runtime.botInfoId) {
+    if (runtime.botInfoId)
       await this.updateBotStatusInDB(runtime.botInfoId, "LOGGED_IN");
-    }
   }
 
   private startHealthCheckLoop() {
     if (this.healthCheckTimer) clearInterval(this.healthCheckTimer);
-
     this.healthCheckTimer = setInterval(async () => {
       const now = Date.now();
-
       for (const [botId, runtime] of this.bots.entries()) {
         if (runtime.status !== "LOGGED_IN" && runtime.status !== "ACTIVE")
           continue;
-
         const diff = now - (runtime.lastPing || 0);
         if (diff > INACTIVE_THRESHOLD) {
           try {
-            // Ping check
             if (runtime.api) {
               await runtime.api.fetchAccountInfo();
               this.updateHeartbeat(botId);
@@ -435,7 +464,6 @@ export class BotRuntimeManager {
   private async handleBotDeath(botId: string, error: unknown) {
     console.error(`[BotManager] Bot Died ${botId}`, error);
     await this.stopBot(botId);
-
     const { data } = await supabase
       .from("zalo_identities")
       .select("ref_bot_id")

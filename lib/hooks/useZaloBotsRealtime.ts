@@ -1,56 +1,96 @@
-/**
- * lib/hooks/useZaloBotsRealtime.ts
- * [FIXED] Sử dụng default export instance từ supabaseClient.
- */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+"use client";
 
 import { useEffect, useState } from "react";
-// Import instance trực tiếp, không dùng createClient()
 import supabase from "@/lib/supabaseClient";
 import { ZaloBot } from "@/lib/types/database.types";
 import { RealtimePostgresChangesPayload } from "@supabase/supabase-js";
 
+interface BotInfoRecord {
+  id: string;
+  status: any;
+  is_active: boolean;
+  is_realtime_active: boolean;
+  health_check_log: any;
+  qr_code?: string;
+  updated_at?: string;
+}
+
+type UIBot = ZaloBot & {
+  bot_info_id?: string;
+  status?: any;
+  is_active?: boolean;
+  is_realtime_active?: boolean;
+  health_check_log?: any;
+};
+
 export function useZaloBotsRealtime(initialBots: ZaloBot[]) {
-  const [bots, setBots] = useState<ZaloBot[]>(initialBots);
+  const [bots, setBots] = useState<UIBot[]>(initialBots as UIBot[]);
+
+  // [FIX] Sử dụng pattern "Derived State" chuẩn của React
+  // Theo dõi prop bằng state (thay vì ref) để so sánh an toàn
+  const [prevInitialBotsJson, setPrevInitialBotsJson] = useState(
+    JSON.stringify(initialBots),
+  );
+
+  const currentJson = JSON.stringify(initialBots);
+
+  // Kiểm tra ngay trong quá trình render
+  if (currentJson !== prevInitialBotsJson) {
+    console.log(
+      "[Realtime] Syncing new initialBots from server (Derived State)",
+    );
+    setPrevInitialBotsJson(currentJson);
+    setBots(initialBots as UIBot[]);
+    // React sẽ restart render ngay tại đây, không chạy xuống dưới -> Hiệu năng tốt, không lỗi Effect
+  }
 
   useEffect(() => {
-    setBots(initialBots);
-  }, [initialBots]);
+    console.log("[Realtime] 🔌 Subscribing to 'zalo_bot_info' changes...");
 
-  useEffect(() => {
-    console.log("[Realtime] 🔌 Subscribing to 'zalo_bots'...");
-
-    // Dùng trực tiếp biến supabase đã import
     const channel = supabase
-      .channel("realtime-zalo-bots")
+      .channel("realtime-zalo-bots-tracking")
       .on(
         "postgres_changes",
         {
-          event: "*",
+          event: "UPDATE",
           schema: "public",
-          table: "zalo_bots",
+          table: "zalo_bot_info",
         },
-        (payload: RealtimePostgresChangesPayload<ZaloBot>) => {
+        (payload: RealtimePostgresChangesPayload<BotInfoRecord>) => {
           if (payload.eventType === "UPDATE") {
-            const updatedBot = payload.new;
-            setBots((prev) =>
-              prev.map((b) => (b.id === updatedBot.id ? updatedBot : b)),
-            );
-          } else if (payload.eventType === "INSERT") {
-            const newBot = payload.new;
-            setBots((prev) => [newBot, ...prev]);
-          } else if (payload.eventType === "DELETE") {
-            const oldRecord = payload.old as Partial<ZaloBot>;
-            if (oldRecord && oldRecord.id) {
-              setBots((prev) => prev.filter((b) => b.id !== oldRecord.id));
-            }
+            const updatedInfo = payload.new;
+            // Fallback lấy ID từ old nếu new thiếu (do cấu hình REPLICA)
+            const recordId = updatedInfo.id || (payload.old as any)?.id;
+
+            if (!recordId) return;
+
+            setBots((prevBots) => {
+              const targetBot = prevBots.find(
+                (b) => b.bot_info_id === recordId,
+              );
+
+              if (!targetBot) return prevBots;
+
+              return prevBots.map((b) => {
+                if (b.bot_info_id === recordId) {
+                  return {
+                    ...b,
+                    status: updatedInfo.status || b.status,
+                    is_active: updatedInfo.is_active ?? b.is_active,
+                    is_realtime_active:
+                      updatedInfo.is_realtime_active ?? b.is_realtime_active,
+                    health_check_log:
+                      updatedInfo.health_check_log || b.health_check_log,
+                  };
+                }
+                return b;
+              });
+            });
           }
         },
       )
-      .subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          console.log("[Realtime] ✅ Connected to Zalo Bots channel.");
-        }
-      });
+      .subscribe();
 
     return () => {
       supabase.removeChannel(channel);

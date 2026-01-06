@@ -1,79 +1,105 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use server";
 
-import supabase from "@/lib/supabaseServer";
-import { hashPassword } from "@/lib/utils/security";
-import { revalidatePath } from "next/cache";
+import supabase from "@/lib/supabaseServer"; // Sử dụng Service Role (Admin) để bypass RLS
 
-/**
- * Kiểm tra xem hệ thống đã được khởi tạo chưa (đã có tài khoản nào chưa).
- */
+// --- Types ---
+export type SetupState = {
+  message?: string;
+  error?: string;
+  success?: boolean;
+};
+
+// --- Check System ---
 export async function checkSystemInitialized() {
   try {
+    // Sử dụng Service Role để đếm chính xác số lượng tài khoản
     const { count, error } = await supabase
       .from("staff_accounts")
       .select("*", { count: "exact", head: true });
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      console.error(
+        "[SystemCheck] Database Error:",
+        JSON.stringify(error, null, 2),
+      );
+      throw new Error(`Database Error: ${error.message}`);
+    }
 
-    // Nếu count > 0 nghĩa là đã khởi tạo
-    return { initialized: (count || 0) > 0 };
-  } catch (error) {
-    console.error("Check Init Error:", error);
-    // Nếu lỗi kết nối DB, mặc định trả về true để không lộ form đăng ký
-    return { initialized: true, error: "Lỗi kết nối CSDL" };
+    // Nếu count > 0 nghĩa là đã có admin/staff -> Hệ thống đã khởi tạo
+    const isInitialized = (count || 0) > 0;
+    console.log(
+      `[SystemCheck] Staff count: ${count}. Initialized: ${isInitialized}`,
+    );
+
+    return { initialized: isInitialized };
+  } catch (e: any) {
+    console.error("[SystemCheck] Exception:", e);
+    // Trả về false để an toàn, cho phép thử setup lại hoặc hiện lỗi
+    throw new Error(e.message || "Failed to check system status");
   }
 }
 
-// Định nghĩa type cho State trả về
-export type SetupState = {
-  error?: string;
-  success?: boolean;
-  message?: string;
-};
+// --- Create First Admin (Internal Logic) ---
+export async function createFirstAdmin(data: any) {
+  // 1. Double check: Chỉ cho phép tạo nếu chưa có ai
+  const { count } = await supabase
+    .from("staff_accounts")
+    .select("*", { count: "exact", head: true });
 
-/**
- * Action tạo tài khoản Admin đầu tiên (Setup Wizard).
- */
-// Thay 'any' bằng 'SetupState | null' hoặc 'unknown'
+  if (count && count > 0) {
+    return {
+      success: false,
+      error: "Hệ thống đã được khởi tạo. Vui lòng đăng nhập.",
+    };
+  }
+
+  // 2. Tạo Admin
+  const { data: newAdmin, error } = await supabase
+    .from("staff_accounts")
+    .insert({
+      username: data.username,
+      password_hash: data.password,
+      full_name: data.fullName,
+      role: "admin",
+      is_active: true,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    console.error("[CreateAdmin] Error:", error);
+    return { success: false, error: error.message };
+  }
+
+  return { success: true, data: newAdmin };
+}
+
+// --- Setup Action (For Login Form) ---
+// [FIX] Khôi phục hàm này để Login Page gọi được
 export async function setupFirstAdminAction(
-  prevState: SetupState | null,
+  prevState: SetupState,
   formData: FormData,
 ): Promise<SetupState> {
   const username = formData.get("username") as string;
   const password = formData.get("password") as string;
   const fullName = formData.get("fullName") as string;
 
-  if (!username || !password || !fullName) {
-    return { error: "Vui lòng điền đầy đủ thông tin." };
+  if (!username || !password) {
+    return { error: "Vui lòng nhập đủ thông tin" };
   }
 
   try {
-    // 1. Double Check: Đảm bảo chưa có ai trong DB
-    const { count } = await supabase
-      .from("staff_accounts")
-      .select("*", { count: "exact", head: true });
-
-    if (count && count > 0) {
-      return { error: "Hệ thống đã được khởi tạo. Vui lòng đăng nhập." };
+    const res = await createFirstAdmin({ username, password, fullName });
+    if (res.success) {
+      return {
+        success: true,
+        message: "Khởi tạo thành công! Vui lòng đăng nhập.",
+      };
+    } else {
+      return { error: res.error || "Lỗi khởi tạo" };
     }
-
-    // 2. Tạo Admin
-    const hashedPassword = hashPassword(password);
-
-    const { error } = await supabase.from("staff_accounts").insert({
-      username,
-      password_hash: hashedPassword,
-      full_name: fullName,
-      role: "admin", // Bắt buộc là Admin
-      is_active: true,
-    });
-
-    if (error) throw new Error(error.message);
-
-    revalidatePath("/login");
-    return { success: true, message: "Khởi tạo thành công! Hãy đăng nhập." };
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error.message : String(error);
-    return { error: err || "Lỗi hệ thống." };
+  } catch (e: any) {
+    return { error: e.message };
   }
 }

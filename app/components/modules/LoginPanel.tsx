@@ -1,12 +1,9 @@
-/**
- * app/components/modules/LoginPanel.tsx
- * [UPDATED] Universal Login Panel.
- * - Supports 'create' mode (Add New Bot).
- * - Supports 'relogin' mode (Fix Broken Bot).
- */
-import { ReactNode } from "react";
+/* eslint-disable @typescript-eslint/no-explicit-any */
+"use client";
+
+import React, { ReactNode, useEffect, useRef, useState } from "react";
 import { LoginState } from "@/lib/types/zalo.types";
-import { IconRefresh, IconQrCode, IconKey } from "@/app/components/ui/Icons"; // [FIXED] Import đủ icons
+import { IconRefresh, IconQrCode, IconKey } from "@/app/components/ui/Icons";
 
 interface LoginPanelProps {
   loginState: LoginState;
@@ -15,24 +12,25 @@ interface LoginPanelProps {
   isSending: boolean;
   tokenInput: string;
 
-  // Handlers
   onLoginMethodChange: (method: "qr" | "token") => void;
   onTokenChange: (token: string) => void;
   onStartLoginQR: () => void;
   onStartLoginToken: () => void;
 
-  // Optional: Re-login specific
   mode?: "create" | "relogin";
   botName?: string;
   onRetrySavedToken?: () => void;
 
+  activeBotId?: string | null;
+
   renderStatus: () => ReactNode;
 }
 
-export function LoginPanel({
+// [FIX 1] Bọc React.memo để tránh re-render không cần thiết từ cha
+export const LoginPanel = React.memo(function LoginPanel({
   loginState,
   loginMethod,
-  qrCode,
+  qrCode: propQrCode,
   isSending,
   onLoginMethodChange,
   onTokenChange,
@@ -42,9 +40,110 @@ export function LoginPanel({
   mode = "create",
   botName,
   onRetrySavedToken,
+  activeBotId,
   renderStatus,
 }: LoginPanelProps) {
   const isRelogin = mode === "relogin";
+
+  // [SSE Logic]
+  const [sseQr, setSseQr] = useState<string | null>(null);
+  const [sseStatus, setSseStatus] = useState<string>("");
+  const eventSourceRef = useRef<EventSource | null>(null);
+  // Dùng ref để track ID đang kết nối, tránh reconnect nếu ID không đổi
+  const connectingIdRef = useRef<string | null>(null);
+
+  // Hiển thị: Ưu tiên SSE QR -> Prop QR
+  const displayQr = sseQr || propQrCode;
+
+  // Lắng nghe SSE khi activeBotId có và đang ở trạng thái Waiting
+  useEffect(() => {
+    const shouldConnect =
+      activeBotId && loginMethod === "qr" && loginState === "LOGGING_IN";
+
+    if (shouldConnect) {
+      // [FIX 2] Nếu đang kết nối tới đúng ID này rồi thì bỏ qua (tránh reconnect loop)
+      if (
+        connectingIdRef.current === activeBotId &&
+        eventSourceRef.current?.readyState !== EventSource.CLOSED
+      ) {
+        console.log(
+          `[SSE-Client] Already connected/connecting to ${activeBotId}. Skipping.`,
+        );
+        return;
+      }
+
+      console.log(`[SSE-Client] Connecting for ${activeBotId}...`);
+      connectingIdRef.current = activeBotId;
+
+      // Đóng kết nối cũ (nếu khác ID)
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+
+      const sse = new EventSource(`/api/auth/qr-sse?sessionId=${activeBotId}`);
+      eventSourceRef.current = sse;
+
+      sse.onopen = () => console.log("[SSE-Client] Connection Opened");
+
+      sse.addEventListener("qr", (e: any) => {
+        // console.log("[SSE-Client] Raw QR Event Data:", e.data ? "Has Data" : "Empty");
+        try {
+          const data = JSON.parse(e.data);
+          if (data.image) {
+            console.log(
+              `[SSE-Client] Received QR Image (Length: ${data.image.length})`,
+            );
+            setSseQr((prev) => (prev !== data.image ? data.image : prev)); // Chỉ set nếu khác để tránh render
+          }
+        } catch (err) {
+          console.error("SSE Parse Error", err);
+        }
+      });
+
+      sse.addEventListener("status", (e: any) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.message) setSseStatus(data.message);
+        } catch {}
+      });
+
+      sse.addEventListener("success", (e: any) => {
+        console.log("[SSE-Client] Login Success!");
+        setSseStatus("Đăng nhập thành công! Đang tải lại...");
+        setTimeout(() => {
+          if (eventSourceRef.current) eventSourceRef.current.close();
+          window.location.reload();
+        }, 1000);
+      });
+
+      sse.addEventListener("error", (e: any) => {
+        if (e.data) {
+          try {
+            const data = JSON.parse(e.data);
+            setSseStatus(`Lỗi: ${data.message}`);
+          } catch {}
+        }
+      });
+
+      sse.onerror = (err) => {
+        // console.error("[SSE-Client] Stream Error (State):", sse.readyState);
+        if (sse.readyState === EventSource.CLOSED) {
+          // setSseStatus("Mất kết nối server. Thử lại...");
+          connectingIdRef.current = null; // Reset để cho phép reconnect nếu cần
+        }
+      };
+
+      return () => {
+        // Cleanup chỉ chạy khi unmount hoặc dependency thay đổi thực sự
+        if (eventSourceRef.current) {
+          console.log("[SSE-Client] Cleanup (Closing Stream)");
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+          connectingIdRef.current = null;
+        }
+      };
+    }
+  }, [activeBotId, loginMethod, loginState]);
 
   return (
     <div className="flex w-full flex-col items-center justify-center">
@@ -53,14 +152,15 @@ export function LoginPanel({
         <h1 className="mb-2 text-center text-xl font-bold text-white">
           {isRelogin ? `Đăng nhập lại: ${botName}` : "Thêm Bot Mới"}
         </h1>
-        <p className="mb-6 text-center text-gray-400 text-xs font-mono">
+        <div className="mb-6 text-center text-gray-400 text-xs font-mono flex flex-col gap-1">
           {renderStatus()}
-        </p>
+          {sseStatus && (
+            <span className="text-blue-400 font-bold">{sseStatus}</span>
+          )}
+        </div>
 
-        {/* --- STATE 1: LỰA CHỌN PHƯƠNG THỨC (IDLE / ERROR) --- */}
         {(loginState === "IDLE" || loginState === "ERROR") && (
           <div className="flex flex-col gap-3 animate-fade-in">
-            {/* [RE-LOGIN ONLY] Option: Saved Token */}
             {isRelogin && onRetrySavedToken && (
               <button
                 onClick={onRetrySavedToken}
@@ -84,7 +184,6 @@ export function LoginPanel({
               </button>
             )}
 
-            {/* Tab Switcher: QR vs Token */}
             <div className="flex rounded-lg bg-gray-900 p-1 border border-gray-700">
               <button
                 onClick={() => onLoginMethodChange("qr")}
@@ -108,7 +207,6 @@ export function LoginPanel({
               </button>
             </div>
 
-            {/* Content: QR Intro */}
             {loginMethod === "qr" && (
               <div className="bg-gray-900/50 p-4 rounded-lg border border-gray-700 text-center">
                 <div className="w-12 h-12 bg-blue-900/30 text-blue-400 rounded-full flex items-center justify-center mx-auto mb-3">
@@ -133,7 +231,6 @@ export function LoginPanel({
               </div>
             )}
 
-            {/* Content: Token Input */}
             {loginMethod === "token" && (
               <div className="flex flex-col gap-3 bg-gray-900/50 p-4 rounded-lg border border-gray-700">
                 <label
@@ -166,13 +263,12 @@ export function LoginPanel({
           </div>
         )}
 
-        {/* --- STATE 2: LOGGING IN (QR DISPLAY) --- */}
         {loginState === "LOGGING_IN" && loginMethod === "qr" && (
           <div className="flex flex-col items-center gap-4 animate-fade-in py-4">
-            {qrCode ? (
-              <div className="rounded-xl bg-white p-3 shadow-2xl">
+            {displayQr ? (
+              <div className="rounded-xl bg-white p-3 shadow-2xl animate-in zoom-in duration-300">
                 <img
-                  src={qrCode}
+                  src={displayQr}
                   alt="Zalo QR Code"
                   className="h-auto w-56 object-contain"
                 />
@@ -180,7 +276,7 @@ export function LoginPanel({
             ) : (
               <div className="flex h-56 w-56 flex-col items-center justify-center rounded-xl border-2 border-dashed border-gray-600 bg-gray-800 text-gray-400">
                 <IconRefresh className="mb-2 w-8 h-8 animate-spin" />
-                <span className="text-xs">Đang khởi tạo session...</span>
+                <span className="text-xs">Đang chờ QR từ Server...</span>
               </div>
             )}
 
@@ -189,13 +285,12 @@ export function LoginPanel({
                 Quét mã bằng Zalo
               </p>
               <p className="text-xs text-gray-500">
-                Mã sẽ hết hạn sau vài phút
+                {displayQr ? "QR đã sẵn sàng" : "Đang kết nối..."}
               </p>
             </div>
 
-            {/* Nút Hủy (Chỉ hiện khi đang chờ QR) */}
             <button
-              onClick={() => window.location.reload()} // Reload đơn giản để thoát trạng thái pending
+              onClick={() => window.location.reload()}
               className="text-xs text-red-400 hover:text-red-300 underline mt-2"
             >
               Hủy bỏ
@@ -205,4 +300,4 @@ export function LoginPanel({
       </div>
     </div>
   );
-}
+});
