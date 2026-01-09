@@ -1,8 +1,9 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/actions/staff.actions.ts
- * [SECURITY UPDATE]
- * - Các action CRUD Staff: Chỉ Admin được thực hiện.
- * - Tích hợp Work Sessions & Audit Logs chuẩn Database V6.
+ * [SECURITY UPDATE V2.2 - FIX TYPES & MIDDLEWARE SYNC]
+ * - Fix: TypeScript error fix for return types.
+ * - Logic: Strict typing for session checks.
  */
 
 "use server";
@@ -17,13 +18,11 @@ import {
   hashPassword,
   hashSessionToken,
 } from "@/lib/utils/security";
-// Import Role từ DB types
-// Giả sử definition role là string literal hoặc enum
+
 type StaffRole = "admin" | "staff";
 type BotPermissionType = "owner" | "chat" | "view_only";
 
 const COOKIE_NAME = "staff_session";
-// [UPDATE] Giảm thời gian session xuống 4 tiếng
 const SESSION_DURATION = 4 * 60 * 60 * 1000;
 
 type SessionPayload = {
@@ -41,16 +40,14 @@ export type LoginState = {
   success?: boolean;
 };
 
-// --- HELPER SESSION TRACKING ---
+// --- SESSION HELPERS ---
 
 async function startWorkSession(staffId: string, token: string) {
   try {
     const tokenHash = hashSessionToken(token);
-
-    // Cleanup: Đóng các session treo quá lâu (VD: > 1 ngày không ping)
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    // Đóng session cũ chưa có end date và last_ping cũ
+    // Close old sessions
     await supabase
       .from("work_sessions")
       .update({ ended_at: new Date().toISOString() })
@@ -58,7 +55,7 @@ async function startWorkSession(staffId: string, token: string) {
       .is("ended_at", null)
       .lt("last_ping_at", yesterday);
 
-    // Tạo session mới cho token này
+    // Create new session
     await supabase.from("work_sessions").insert({
       staff_id: staffId,
       started_at: new Date().toISOString(),
@@ -79,7 +76,6 @@ async function endWorkSession(staffId: string, token?: string) {
       .is("ended_at", null);
 
     if (token) {
-      // Chỉ đóng đúng session của token này
       const tokenHash = hashSessionToken(token);
       query = query.eq("session_token_hash", tokenHash);
     }
@@ -87,6 +83,23 @@ async function endWorkSession(staffId: string, token?: string) {
     await query;
   } catch (e) {
     console.error("End Session Error:", e);
+  }
+}
+
+// [NEW] Hàm cưỡng chế logout từ phía Server (Dùng cho SSE Dead Man Switch)
+export async function forceLogout(staffId: string) {
+  console.warn(`[Security] ☠️ FORCE LOGOUT Staff: ${staffId}`);
+  try {
+    await supabase
+      .from("work_sessions")
+      .update({
+        ended_at: new Date().toISOString(),
+        notes: "Force logout due to connection loss (SSE Dead Man Switch)",
+      })
+      .eq("staff_id", staffId)
+      .is("ended_at", null);
+  } catch (e) {
+    console.error("Force Logout Error:", e);
   }
 }
 
@@ -153,24 +166,65 @@ export async function staffLoginAction(
 export async function staffLogoutAction() {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
-  const session = await getStaffSession();
 
-  if (session && token) {
+  // Note: Gọi getStaffSession ở đây có thể trả về null nếu DB đã đóng session
+  // Nên ta lấy payload verify chay để log audit
+  let staffId: string | null = null;
+  if (token) {
+    const payload = verifySessionToken<SessionPayload>(token);
+    if (payload) staffId = payload.id;
+  }
+
+  if (staffId && token) {
     // [SYS] Đóng Session
-    await endWorkSession(session.id, token);
-    await createAuditLog(session.id, "AUTH", "LOGOUT", {});
+    await endWorkSession(staffId, token);
+    await createAuditLog(staffId, "AUTH", "LOGOUT", {});
   }
 
   cookieStore.delete(COOKIE_NAME);
   redirect("/login");
 }
 
+// [UPDATED] STATEFUL SESSION CHECK + COOKIE CLEANUP
 export async function getStaffSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
   if (!token) return null;
+
+  // 1. Verify Crypto Signature
   const payload = verifySessionToken<SessionPayload>(token);
-  if (!payload || payload.expiresAt < Date.now()) return null;
+  if (!payload || payload.expiresAt < Date.now()) {
+    // Token expired -> Cleanup
+    cookieStore.delete(COOKIE_NAME);
+    return null;
+  }
+
+  // 2. Verify Database State (Zero Trust)
+  try {
+    const tokenHash = hashSessionToken(token);
+    const { data } = await supabase
+      .from("work_sessions")
+      .select("id")
+      .eq("staff_id", payload.id)
+      .eq("session_token_hash", tokenHash)
+      .is("ended_at", null) // Phiên phải chưa kết thúc
+      .single();
+
+    if (!data) {
+      console.warn(
+        `[Auth] Token valid but Session revoked/expired in DB. User: ${payload.username}. Cleaning Cookie.`,
+      );
+
+      // [CRITICAL FIX] Xóa cookie ngay lập tức để phá vòng lặp Redirect
+      cookieStore.delete(COOKIE_NAME);
+
+      return null;
+    }
+  } catch (e) {
+    console.error("[Auth] Session DB Check Error:", e);
+    return null; // Fail-safe
+  }
+
   return payload;
 }
 

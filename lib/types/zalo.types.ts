@@ -1,11 +1,12 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * lib/types/zalo.types.ts
  * Nguồn sự thật duy nhất (SSOT).
- * [UPDATED V6.3] Support Normalized Content (Data Wrapper) & Media IDs.
+ * [UPDATED V7.0] Fix User Type Definition for Runtime compatibility.
  */
 
 import type {
-  User,
+  User as ZcaUser, // Rename gốc để tránh trùng
   GroupInfo,
   MessageContent as ZcaMessageContent,
   FindUserResponse as RawFindUserResponse,
@@ -17,6 +18,18 @@ import type {
   ReviewPendingMemberRequestResponse,
   GetGroupLinkDetailResponse,
 } from "zca-js";
+
+// [FIX] Extended User Type để hỗ trợ cấu trúc lồng nhau (profile/data)
+// Đây là type linh hoạt hơn để hứng dữ liệu từ fetchAccountInfo
+export type ZaloRawUser = ZcaUser & {
+  profile?: ZcaUser & { globalId?: string };
+  data?: ZcaUser & { globalId?: string };
+  globalId?: string;
+  [key: string]: any; // Allow dynamic props
+};
+
+// Map lại User thành type mở rộng
+export type User = ZaloRawUser;
 
 // --- UI NORMALIZED TYPES ---
 
@@ -313,7 +326,7 @@ export type ViewState = "chat" | "manage" | "setting" | "crm" | "staff";
 export type MessageContent = ZcaMessageContent;
 
 export type {
-  User,
+  User as ZcaUser,
   ZcaMessageContent,
   GroupInfo,
   RawFindUserResponse,

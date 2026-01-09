@@ -2,6 +2,7 @@ import { getStaffSession } from "@/lib/actions/staff.actions";
 import { redirect } from "next/navigation";
 import { ReactNode } from "react";
 import { MainMenu } from "@/app/components/modules/MainMenu";
+import { SSEProvider } from "@/app/context/SSEContext"; // [NEW]
 
 export default async function SystemLayout({
   children,
@@ -29,7 +30,8 @@ export default async function SystemLayout({
 
       {/* MAIN CONTENT AREA */}
       <main className="flex-1 relative h-full w-full overflow-hidden">
-        {children}
+        {/* [NEW] Bọc SSE Provider ở đây để giữ kết nối khi chuyển trang trong System */}
+        <SSEProvider>{children}</SSEProvider>
       </main>
     </div>
   );

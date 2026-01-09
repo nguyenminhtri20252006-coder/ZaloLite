@@ -1,14 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use server";
 
-/**
- * lib/actions/bot.actions.ts
- * [UPDATED V11.0] INTEGRATED WITH NEW BOT RUNTIME
- * - Optimized: retryBotLoginAction now uses manager.resumeSession().
- * - Optimized: addBotWithTokenAction uses manager.resumeSession() to verify DB persistence.
- * - Restored: toggleRealtimeAction works with startRealtime/stopRealtime.
- */
-
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
 import { SyncService } from "@/lib/core/services/sync-service";
 import supabase from "@/lib/supabaseServer";
@@ -17,71 +9,28 @@ import { getStaffSession } from "@/lib/actions/staff.actions";
 import { ZaloBot } from "@/lib/types/database.types";
 import { Zalo } from "zca-js";
 
-// --- HELPERS ---
 async function requireAdmin() {
   const session = await getStaffSession();
-  if (!session || session.role !== "admin") throw new Error("Unauthorized");
+  if (!session || session.role !== "admin")
+    throw new Error("Unauthorized: Admin required");
   return session;
 }
 
-// [HELPER] Resolve Identity ID
 async function resolveIdentityId(
   inputId: string,
 ): Promise<{ identityId: string; botInfoId: string | null } | null> {
-  // 1. Try Identity ID
   const { data: byId } = await supabase
     .from("zalo_identities")
     .select("id, ref_bot_id")
     .eq("id", inputId)
     .single();
-
   if (byId) return { identityId: byId.id, botInfoId: byId.ref_bot_id };
-
-  // 2. Try Ref Bot ID
   const { data: byRef } = await supabase
     .from("zalo_identities")
     .select("id, ref_bot_id")
     .eq("ref_bot_id", inputId)
     .single();
-
-  if (byRef) {
-    return { identityId: byRef.id, botInfoId: byRef.ref_bot_id };
-  }
-
-  return null;
-}
-
-async function waitForBotId(
-  api: any,
-  maxRetries = 5,
-): Promise<{ id: string; name?: string; avatar?: string } | null> {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      const id = api.getOwnId();
-      const rawInfo = await api.fetchAccountInfo().catch(() => null);
-
-      let profile = rawInfo;
-      if (rawInfo?.data) profile = rawInfo.data;
-      else if (rawInfo?.profile) profile = rawInfo.profile;
-
-      if (profile && (profile.id || profile.uid || profile.userId)) {
-        return {
-          id: profile.id || profile.uid || profile.userId,
-          name:
-            profile.displayName ||
-            profile.name ||
-            profile.zaloName ||
-            profile.username,
-          avatar: profile.avatar || profile.avt,
-        };
-      }
-
-      if (id && id !== "0" && id !== "undefined") {
-        return { id };
-      }
-    } catch (e) {}
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-  }
+  if (byRef) return { identityId: byRef.id, botInfoId: byRef.ref_bot_id };
   return null;
 }
 
@@ -94,39 +43,47 @@ function generateRandomImei(): string {
   return result;
 }
 
-// ... (READ ACTIONS) ...
+async function waitForBotId(
+  api: any,
+  maxRetries = 5,
+): Promise<{ id: string; name?: string; avatar?: string } | null> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const id = api.getOwnId();
+      const rawInfo = await api.fetchAccountInfo().catch(() => null);
+      const profile = rawInfo?.data || rawInfo?.profile || rawInfo;
+      if (profile && (profile.id || profile.uid || profile.userId)) {
+        return {
+          id: profile.id || profile.uid || profile.userId,
+          name:
+            profile.displayName ||
+            profile.name ||
+            profile.zaloName ||
+            profile.username,
+          avatar: profile.avatar || profile.avt,
+        };
+      }
+      if (id && id !== "0" && id !== "undefined") return { id };
+    } catch (e) {}
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  return null;
+}
+
 export async function getBotsAction(): Promise<ZaloBot[]> {
   const session = await getStaffSession();
   if (!session) throw new Error("Unauthorized");
-
   const { data, error } = await supabase
     .from("zalo_identities")
     .select(
       `
-        id,
-        name:display_name, 
-        avatar,
-        zalo_global_id,
-        bot_info:zalo_bot_info!inner (
-          id,
-          access_token,
-          status,
-          is_active,
-          is_realtime_active,
-          health_check_log,
-          created_at,
-          updated_at
-        )
-      `,
+            id, name:root_name, avatar, zalo_global_id,
+            bot_info:zalo_bot_info!inner (id, access_token, status, is_active, is_realtime_active, health_check_log, created_at, updated_at, sync_status)
+        `,
     )
     .eq("type", "system_bot")
     .order("created_at", { ascending: false });
-
-  if (error) {
-    const msg = error.message || JSON.stringify(error);
-    throw new Error(`Get Bots Error: ${msg}`);
-  }
-
+  if (error) throw new Error(`Get Bots Error: ${error.message}`);
   return data.map((item: any) => ({
     id: item.id,
     name: item.name,
@@ -137,39 +94,10 @@ export async function getBotsAction(): Promise<ZaloBot[]> {
   }));
 }
 
-// ... (WRITE ACTIONS) ...
 export async function createPlaceholderBotAction() {
   await requireAdmin();
-  const name = `Bot Mới ${new Date().toLocaleTimeString()}`;
-
-  const { data: info, error: infoError } = await supabase
-    .from("zalo_bot_info")
-    .insert({
-      name: name,
-      status: { state: "QR_WAITING", message: "Đang chờ quét QR..." },
-      is_active: true,
-      is_realtime_active: false,
-    })
-    .select()
-    .single();
-
-  if (infoError) throw infoError;
-
-  const { data: identity, error } = await supabase
-    .from("zalo_identities")
-    .insert({
-      zalo_global_id: `temp_${info.id}`,
-      type: "system_bot",
-      display_name: name,
-      ref_bot_id: info.id,
-    })
-    .select()
-    .single();
-
-  if (error) throw error;
-
-  revalidatePath("/bot-manager");
-  return identity;
+  console.warn("[Legacy Action] createPlaceholderBotAction called.");
+  return { id: "deprecated" };
 }
 
 export async function addBotWithTokenAction(
@@ -177,25 +105,18 @@ export async function addBotWithTokenAction(
   tempBotId?: string,
 ) {
   await requireAdmin();
-  console.log(`[AddBot] Processing token input...`);
-
-  // 1. Parse Token
   let credentials: any = {};
   try {
     credentials = JSON.parse(tokenInput);
   } catch (e) {
     if (tokenInput.includes("zpw_sek") || tokenInput.trim().startsWith("{"))
       credentials = { cookie: tokenInput };
-    else
-      return { success: false, error: "Token không hợp lệ (JSON parse error)" };
+    else return { success: false, error: "Token không hợp lệ" };
   }
-
   if (!credentials.imei) credentials.imei = generateRandomImei();
   if (!credentials.userAgent)
     credentials.userAgent =
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (ZaloPC)";
-
-  // Handle cookie as string if needed
   if (
     typeof credentials.cookie === "string" &&
     credentials.cookie.trim().startsWith("{")
@@ -204,9 +125,6 @@ export async function addBotWithTokenAction(
       credentials.cookie = JSON.parse(credentials.cookie);
     } catch {}
   }
-
-  // 2. Verify Token with ZCA-JS (Test Connection First)
-  console.log("--- [DEBUG] Verifying Token with ZCA-JS ---");
   const zaloOptions = {
     authType: "cookie",
     cookie: credentials.cookie,
@@ -214,24 +132,19 @@ export async function addBotWithTokenAction(
     userAgent: credentials.userAgent,
     selfListen: false,
   };
-
   let globalId: string | null = null;
   let botName = "Zalo Bot";
   let botAvatar = "";
-
   try {
     const tempZalo = new Zalo(zaloOptions);
     const api = await tempZalo.login(credentials);
     const info = await waitForBotId(api);
-
     if (info) {
       globalId = String(info.id);
       botName = info.name || `Zalo User ${globalId}`;
       botAvatar = info.avatar || "";
     } else {
-      throw new Error(
-        "Token hợp lệ nhưng không lấy được ID (Session Timeout).",
-      );
+      throw new Error("Token hợp lệ nhưng không lấy được ID.");
     }
   } catch (e: any) {
     return {
@@ -240,23 +153,19 @@ export async function addBotWithTokenAction(
     };
   }
 
-  // 3. Database Sync Logic
   const now = new Date().toISOString();
   let finalBotId: string | undefined = undefined;
-
   const { data: existingBot } = await supabase
     .from("zalo_identities")
     .select("id, ref_bot_id")
     .eq("zalo_global_id", globalId)
     .eq("type", "system_bot")
     .single();
-
   let botInfoIdToUpsert = existingBot?.ref_bot_id;
-
-  // IMPORTANT: Save RAW credentials
   const botInfoPayload = {
-    access_token: credentials, // Save Raw JSON
+    access_token: credentials,
     name: botName,
+    avatar: botAvatar,
     status: {
       state: "LOGGED_IN",
       message: "Cập nhật token thành công",
@@ -264,11 +173,8 @@ export async function addBotWithTokenAction(
     },
     last_active_at: now,
     is_active: true,
-    avatar: botAvatar,
   };
-
   try {
-    // A. Handle Bot Info
     if (botInfoIdToUpsert) {
       await supabase
         .from("zalo_bot_info")
@@ -282,17 +188,14 @@ export async function addBotWithTokenAction(
         .single();
       botInfoIdToUpsert = newInfo?.id;
     }
-
-    // B. Handle Identity
     const identityPayload = {
       zalo_global_id: globalId,
-      display_name: botName,
+      root_name: botName,
       avatar: botAvatar,
       type: "system_bot",
       ref_bot_id: botInfoIdToUpsert,
       updated_at: now,
     };
-
     if (existingBot) {
       await supabase
         .from("zalo_identities")
@@ -300,54 +203,48 @@ export async function addBotWithTokenAction(
         .eq("id", existingBot.id);
       finalBotId = existingBot.id;
     } else {
-      if (tempBotId) {
-        const { data: tempCheck } = await supabase
-          .from("zalo_identities")
-          .select("id")
-          .eq("id", tempBotId)
-          .single();
-        if (tempCheck) {
-          await supabase
-            .from("zalo_identities")
-            .update(identityPayload)
-            .eq("id", tempBotId);
-          finalBotId = tempBotId;
-        }
-      }
-      if (!finalBotId) {
-        const { data: newIdentity } = await supabase
-          .from("zalo_identities")
-          .insert(identityPayload)
-          .select("id")
-          .single();
-        finalBotId = newIdentity?.id;
-      }
-    }
-
-    if (tempBotId && finalBotId !== tempBotId) {
-      await deleteBotAction(tempBotId);
+      const { data: newIdentity } = await supabase
+        .from("zalo_identities")
+        .insert(identityPayload)
+        .select("id")
+        .single();
+      finalBotId = newIdentity?.id;
     }
   } catch (dbError: any) {
-    return {
-      success: false,
-      error: "Database Save Failed: " + dbError.message,
-    };
+    return { success: false, error: "DB Error: " + dbError.message };
   }
 
-  // 4. Start Runtime using RESUME SESSION (Best Practice)
-  // This verifies that the saved token in DB is actually retrievable and usable
   if (finalBotId) {
     try {
-      console.log(`[Runtime] Starting Bot via Resume: ${finalBotId}`);
       const manager = BotRuntimeManager.getInstance();
       await manager.resumeSession(finalBotId);
-    } catch (e: any) {
-      console.error("[Runtime] Start Failed:", e);
-    }
+    } catch (e) {}
   }
-
   revalidatePath("/bot-manager");
   return { success: true, botId: finalBotId };
+}
+export async function resolveLoginConflictAction(
+  botId: string,
+  decision: "retry" | "create_new",
+) {
+  await requireAdmin();
+  try {
+    const manager = BotRuntimeManager.getInstance();
+    await manager.resolveConflict(botId, decision);
+    revalidatePath("/bot-manager");
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+}
+
+export async function cancelLoginAction(tempId: string) {
+  try {
+    BotRuntimeManager.getInstance().cleanupTempSession(tempId);
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
 }
 
 export async function updateBotTokenAction(
@@ -359,48 +256,13 @@ export async function updateBotTokenAction(
 
 export async function deleteBotAction(inputId: string) {
   await requireAdmin();
-  console.log(`[DeleteBot] REQUEST DELETE for ID: ${inputId}`);
-
   try {
     const resolved = await resolveIdentityId(inputId);
-    if (!resolved) {
-      return { success: false, error: "Bot not found" };
-    }
-
+    if (!resolved) return { success: false, error: "Bot not found" };
     const { identityId, botInfoId } = resolved;
-
-    // Stop Runtime
     try {
       BotRuntimeManager.getInstance().stopBot(identityId);
     } catch (e) {}
-
-    // Clean Related Data
-    const { data: botMemberships } = await supabase
-      .from("conversation_members")
-      .select("conversation_id")
-      .eq("identity_id", identityId);
-
-    if (botMemberships && botMemberships.length > 0) {
-      const convIds = botMemberships.map((m) => m.conversation_id);
-      const { data: privateConvs } = await supabase
-        .from("conversations")
-        .select("id")
-        .in("id", convIds)
-        .eq("type", "private");
-
-      if (privateConvs && privateConvs.length > 0) {
-        const idsToDelete = privateConvs.map((c) => c.id);
-        await supabase
-          .from("messages")
-          .delete()
-          .in("conversation_id", idsToDelete);
-        await supabase
-          .from("conversation_members")
-          .delete()
-          .in("conversation_id", idsToDelete);
-        await supabase.from("conversations").delete().in("id", idsToDelete);
-      }
-    }
 
     await supabase
       .from("messages")
@@ -418,23 +280,17 @@ export async function deleteBotAction(inputId: string) {
       .from("zalo_connections")
       .delete()
       .eq("target_id", identityId);
-
-    if (botInfoId) {
+    if (botInfoId)
       await supabase
         .from("staff_bot_permissions")
         .delete()
         .eq("bot_id", botInfoId);
-    }
-
     await supabase.from("zalo_identities").delete().eq("id", identityId);
-    if (botInfoId) {
+    if (botInfoId)
       await supabase.from("zalo_bot_info").delete().eq("id", botInfoId);
-    }
-
     revalidatePath("/bot-manager");
     return { success: true };
   } catch (e: any) {
-    console.error(`[DeleteBot] CRITICAL FAILURE:`, e);
     return { success: false, error: e.message };
   }
 }
@@ -442,8 +298,11 @@ export async function deleteBotAction(inputId: string) {
 export async function stopBotAction(botId: string) {
   await requireAdmin();
   try {
+    const resolved = await resolveIdentityId(botId);
+    if (!resolved) return { success: false, error: "Bot Identity Not Found" };
+
     const manager = BotRuntimeManager.getInstance();
-    await manager.stopBot(botId);
+    await manager.stopBot(resolved.identityId); // Ensure Identity ID is used
     revalidatePath("/bot-manager");
     return { success: true };
   } catch (e: any) {
@@ -451,40 +310,50 @@ export async function stopBotAction(botId: string) {
   }
 }
 
+// [UPDATED] Quản lý Realtime: Bật/Tắt listener
 export async function toggleRealtimeAction(botId: string, enable: boolean) {
   await requireAdmin();
+  const manager = BotRuntimeManager.getInstance();
 
-  // Update Flag in DB first
-  const { data: identity } = await supabase
-    .from("zalo_identities")
-    .select("ref_bot_id")
-    .eq("id", botId)
-    .single();
-
-  if (identity?.ref_bot_id) {
-    await supabase
-      .from("zalo_bot_info")
-      .update({ is_realtime_active: enable })
-      .eq("id", identity.ref_bot_id);
+  // 1. Phân giải ID để lấy đúng identityId và ref_bot_id
+  const resolved = await resolveIdentityId(botId);
+  if (!resolved || !resolved.botInfoId) {
+    return {
+      success: false,
+      error: "Bot not found or not linked to Info (Check Identity Table)",
+    };
   }
 
-  // Then Control Runtime
-  const manager = BotRuntimeManager.getInstance();
+  const { identityId, botInfoId } = resolved;
+
+  // 2. Update DB trước (Optimistic UI)
+  await supabase
+    .from("zalo_bot_info")
+    .update({ is_realtime_active: enable })
+    .eq("id", botInfoId);
+
+  // 3. Gọi Runtime Manager với ID CHUẨN (identityId)
   try {
     if (enable) {
-      await manager.startRealtime(botId);
+      await manager.startRealtime(identityId);
     } else {
-      await manager.stopRealtime(botId);
+      await manager.stopRealtime(identityId);
     }
     revalidatePath("/bot-manager");
     return { success: true };
   } catch (e: any) {
-    return { success: false, error: "Lỗi thao tác Realtime: " + e.message };
+    // Rollback
+    await supabase
+      .from("zalo_bot_info")
+      .update({ is_realtime_active: !enable })
+      .eq("id", botInfoId);
+    return { success: false, error: e.message };
   }
 }
 
 export async function startBotLoginAction(identityId: string) {
   try {
+    console.log(`[Action] Received Start Login Request for: ${identityId}`);
     const manager = BotRuntimeManager.getInstance();
     await manager.startLoginQR(identityId);
     return { success: true };
@@ -493,13 +362,14 @@ export async function startBotLoginAction(identityId: string) {
   }
 }
 
-// [UPDATED] Use Resume Session Logic
 export async function retryBotLoginAction(identityId: string) {
   try {
-    const manager = BotRuntimeManager.getInstance();
-    // Tự động lấy token từ DB và login
-    await manager.resumeSession(identityId);
+    // Resolve ID để chắc chắn
+    const resolved = await resolveIdentityId(identityId);
+    if (!resolved) throw new Error("Bot ID not valid");
 
+    const manager = BotRuntimeManager.getInstance();
+    await manager.resumeSession(resolved.identityId);
     revalidatePath("/bot-manager");
     return { success: true };
   } catch (e: any) {
@@ -507,12 +377,60 @@ export async function retryBotLoginAction(identityId: string) {
   }
 }
 
-export async function syncBotDataAction(botId: string) {
+export async function debugBotInfoAction(inputId: string) {
+  await requireAdmin();
+  try {
+    const resolved = await resolveIdentityId(inputId);
+    if (!resolved) return { success: false, error: `Không tìm thấy Bot` };
+    const res = await SyncService.debugFetchFullInfo(resolved.identityId);
+    return res;
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+}
+
+export async function syncBotDataAction(inputId: string) {
   try {
     await requireAdmin();
-    const res = await SyncService.syncAll(botId);
-    revalidatePath("/bot-manager");
-    return res;
+    const resolved = await resolveIdentityId(inputId);
+    if (!resolved) return { success: false, error: `Không tìm thấy Bot` };
+
+    // Async call - không await để trả về UI ngay
+    SyncService.syncAll(resolved.identityId, inputId).catch(console.error);
+
+    return { success: true, message: "Sync started in background" };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+}
+
+export async function stopBotSyncAction(inputId: string) {
+  try {
+    await requireAdmin();
+    const resolved = await resolveIdentityId(inputId);
+    if (!resolved) return { success: false, error: "Bot not found" };
+
+    // Gọi service để set cờ abort
+    const targetBotId = resolved.botInfoId;
+
+    if (targetBotId) {
+      await supabase
+        .from("zalo_bot_info")
+        .update({
+          sync_status: {
+            state: "STOPPED",
+            message: "User cancelled manually",
+            last_updated: new Date().toISOString(),
+          },
+        })
+        .eq("id", targetBotId);
+
+      // Gọi hàm stop in-memory (nếu service đang cache)
+      SyncService.stopSync(resolved.identityId);
+      return { success: true };
+    }
+
+    return { success: false, error: "Bot Info ID not found" };
   } catch (e: any) {
     return { success: false, error: e.message };
   }

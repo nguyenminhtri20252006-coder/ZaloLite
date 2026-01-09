@@ -3,12 +3,11 @@
 
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
 import { ZaloUserProfile, ZaloSettingsResponse } from "@/lib/types/zalo.types";
-import supabase from "@/lib/supabaseServer"; // Sử dụng Supabase Admin
+import supabase from "@/lib/supabaseServer";
 
 // Helper để lấy API (Write Actions)
 async function getBotAPI(botId: string) {
   try {
-    // Cần đảm bảo botId ở đây là Identity ID để gọi Runtime
     return BotRuntimeManager.getInstance().getBotAPI(botId);
   } catch (error) {
     throw new Error(
@@ -55,7 +54,7 @@ export async function getBotProfileAction(
       .select(
         `
         zalo_global_id,
-        display_name,
+        display_name:root_name,
         avatar,
         raw_data,
         bot_info:ref_bot_id (

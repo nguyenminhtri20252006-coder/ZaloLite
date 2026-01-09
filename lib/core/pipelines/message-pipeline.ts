@@ -268,7 +268,6 @@ export class MessagePipeline {
       content: message.content, // JSONB Normalized
       listening_bot_ids: [botId], // Bot này đã nhận được
       sent_at: new Date(message.timestamp).toISOString(),
-      is_self: payload.isSelf,
     });
 
     if (insertError) {
