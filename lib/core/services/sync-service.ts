@@ -404,6 +404,8 @@ export class SyncService {
               identityId,
               friendName,
               friend.avatar,
+              
+      friend, 
             );
 
             if (convId) {

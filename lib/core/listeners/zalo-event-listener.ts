@@ -1,34 +1,26 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/**
- * lib/core/listeners/zalo-event-listener.ts
- * [VERSION 15.3 - RAW LOGGING & DEBUG MODE]
- * - Change: Temporarily disabled MessagePipeline to bypass DB errors.
- * - Logic: Catch All Events -> Classify -> Log Raw JSON.
- */
-
 import { API } from "zca-js";
-// import { MessagePipeline } from "@/lib/core/pipelines/message-pipeline"; // [DISABLED FOR DEBUG]
+import { SimpleMessagePipeline } from "@/lib/core/pipelines/simple-message-pipeline";
 import { InteractionHandler } from "./handlers/interaction-handler";
 import { GroupHandler } from "./handlers/group-handler";
 import { EphemeralHandler } from "./handlers/ephemeral-handler";
+import { DebugLogger } from "@/lib/utils/debug-logger"; // Import Logger
 
 export class ZaloEventListener {
   private botId: string;
-  private api: any; // Raw API object
-  private isListening: boolean = false; // [GUARD FLAG]
+  private api: any;
+  private isListening: boolean = false;
 
-  // Sub-handlers
-  // private messagePipeline: MessagePipeline; // [DISABLED]
+  private messagePipeline: SimpleMessagePipeline;
   private interactionHandler: InteractionHandler;
   private groupHandler: GroupHandler;
   private ephemeralHandler: EphemeralHandler;
 
   constructor(botId: string, api: API) {
     this.botId = botId;
-    this.api = api as any; // Cast to access listener
+    this.api = api as any;
 
-    // Init Handlers
-    // this.messagePipeline = new MessagePipeline(); // [DISABLED]
+    this.messagePipeline = new SimpleMessagePipeline();
     this.interactionHandler = new InteractionHandler();
     this.groupHandler = new GroupHandler();
     this.ephemeralHandler = new EphemeralHandler();
@@ -45,129 +37,78 @@ export class ZaloEventListener {
       return;
     }
 
-    console.log(
-      `[Listener:${this.botId}] 🔌 Starting Event Listener (RAW LOGGING MODE)...`,
-    );
-
-    // 1. Clean up old listeners to prevent duplication
+    console.log(`[Listener:${this.botId}] 🔌 Starting Event Listener...`);
     this.stop();
 
-    // 2. Register Events
     const listener = this.api.listener;
 
     // --- MESSAGE ---
     listener.on("message", async (msg: any) => {
-      // [GUARD] Chặn ngay nếu đã tắt lắng nghe
       if (!this.isListening) return;
 
-      // [DEBUG LOGIC] Phân loại & Log Raw
-      const msgType = msg.data?.msgType || "unknown";
-      const sender = msg.data?.uidFrom || "unknown";
-      const thread = msg.data?.id || "unknown";
+      // [DEBUG LOG]
+      DebugLogger.logEvent(this.botId, "MESSAGE", msg);
 
-      console.log(`\n========================================`);
-      console.log(`[Listener:${this.botId}] 📩 EVENT: MESSAGE`);
-      console.log(`- Type: ${msgType}`);
-      console.log(`- From: ${sender} | Thread: ${thread}`);
-      console.log(`- Raw JSON:`, JSON.stringify(msg, null, 2));
-      console.log(`========================================\n`);
-
-      /* [DISABLED PIPELINE]
       try {
         await this.messagePipeline.process(this.botId, msg);
       } catch (e) {
-        console.error(`[Listener:${this.botId}] Message Error:`, e);
+        console.error(`[Listener:${this.botId}] Pipeline Error:`, e);
       }
-      */
     });
 
     // --- GROUP EVENTS ---
     listener.on("group_event", async (event: any) => {
-      if (!this.isListening) return; // [GUARD]
-
-      console.log(`\n========================================`);
-      console.log(`[Listener:${this.botId}] 👥 EVENT: GROUP`);
-      console.log(`- Type: ${event.type}`);
-      console.log(`- GroupId: ${event.groupId}`);
-      console.log(`- Raw JSON:`, JSON.stringify(event, null, 2));
-      console.log(`========================================\n`);
-
-      // Vẫn giữ handler nhẹ này vì nó ít gây lỗi DB phức tạp
+      if (!this.isListening) return;
+      DebugLogger.logEvent(this.botId, "GROUP_EVENT", event);
       await this.groupHandler.handleGroupEvent(event, this.botId, this.api);
     });
 
-    // --- INTERACTION: UNDO (Thu hồi) ---
+    // --- INTERACTION ---
     listener.on("undo", async (event: any) => {
-      if (!this.isListening) return; // [GUARD]
-
-      console.log(`\n========================================`);
-      console.log(`[Listener:${this.botId}] ↩️ EVENT: UNDO (RECALL)`);
-      console.log(`- MsgId: ${event.msgId}`);
-      console.log(`- Raw JSON:`, JSON.stringify(event, null, 2));
-      console.log(`========================================\n`);
-
+      if (!this.isListening) return;
+      DebugLogger.logEvent(this.botId, "UNDO", event);
       await this.interactionHandler.handleUndo(event, this.botId);
     });
 
-    // --- INTERACTION: REACTION ---
     listener.on("reaction", async (event: any) => {
-      if (!this.isListening) return; // [GUARD]
-
-      console.log(`\n========================================`);
-      console.log(`[Listener:${this.botId}] ❤️ EVENT: REACTION`);
-      console.log(`- Raw JSON:`, JSON.stringify(event, null, 2));
-      console.log(`========================================\n`);
-
+      if (!this.isListening) return;
+      DebugLogger.logEvent(this.botId, "REACTION", event);
       await this.interactionHandler.handleReaction(event, this.botId);
     });
 
-    // --- EPHEMERAL: TYPING ---
+    // --- EPHEMERAL ---
     listener.on("typing", (event: any) => {
-      if (!this.isListening) return; // [GUARD]
-      // Typing xảy ra liên tục, log gọn hơn
-      console.log(
-        `[Listener:${this.botId}] ⌨️ EVENT: TYPING | User: ${event.uid} | IsTyping: ${event.isTyping}`,
-      );
-      // console.log(`Raw:`, JSON.stringify(event)); // Uncomment nếu cần xem full
-
+      if (!this.isListening) return;
+      // Typing quá nhiều nên có thể không cần log detail liên tục
+      // DebugLogger.logEvent(this.botId, "TYPING", event);
       this.ephemeralHandler.handleTyping(event, this.botId);
     });
 
-    // --- EPHEMERAL: SEEN ---
     listener.on("seen", (event: any) => {
-      if (!this.isListening) return; // [GUARD]
-
-      console.log(
-        `[Listener:${this.botId}] 👀 EVENT: SEEN | User: ${event.uid} | Msg: ${event.msgId}`,
-      );
-      // console.log(`Raw:`, JSON.stringify(event));
-
+      if (!this.isListening) return;
       this.ephemeralHandler.handleSeen(event, this.botId);
     });
 
-    // --- ERROR HANDLING ---
     listener.on("error", (error: any) => {
       console.error(`[Listener:${this.botId}] 💥 Socket Error:`, error);
     });
 
-    // 3. Start Socket
     try {
       listener.start();
       this.isListening = true;
-      console.log(`[Listener:${this.botId}] ✅ Listener STARTED (Debug Mode).`);
+      console.log(`[Listener:${this.botId}] ✅ Listener STARTED.`);
     } catch (e) {
       console.error(`[Listener:${this.botId}] Failed to start listener:`, e);
     }
   }
 
   public stop() {
-    this.isListening = false; // [IMPORTANT] Set flag immediately
-
+    this.isListening = false;
     if (this.api.listener) {
       try {
         this.api.listener.stop();
-        this.api.listener.removeAllListeners(); // Quan trọng: Xóa hết đăng ký cũ
-        console.log(`[Listener:${this.botId}] 🛑 Listener STOPPED & Cleaned.`);
+        this.api.listener.removeAllListeners();
+        console.log(`[Listener:${this.botId}] 🛑 Listener STOPPED.`);
       } catch (e) {
         console.warn(`[Listener:${this.botId}] Error stopping listener:`, e);
       }

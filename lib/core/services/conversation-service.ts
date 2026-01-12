@@ -57,6 +57,7 @@ export class ConversationService {
     friendIdentityId: string,
     friendName: string,
     friendAvatar: string,
+    rawData: any = {}, // [NEW PARAM]
   ) {
     const participants = [botId, friendIdentityId];
 
@@ -74,6 +75,7 @@ export class ConversationService {
         .update({
           name: friendName,
           avatar: friendAvatar,
+          raw_data: rawData, // [UPDATE RAW]
           last_activity_at: new Date().toISOString(),
         })
         .eq("id", existingConv.id);
@@ -88,6 +90,7 @@ export class ConversationService {
         name: friendName,
         avatar: friendAvatar,
         participant_ids: participants,
+        raw_data: rawData, // [INSERT RAW]
         updated_at: new Date().toISOString(),
         created_at: new Date().toISOString(),
       })

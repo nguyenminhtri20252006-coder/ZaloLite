@@ -1,167 +1,167 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 "use server";
 
-import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
-import {
-  GroupInfoResponse,
-  GetGroupMembersInfoResponse,
-} from "@/lib/types/zalo.types";
 import supabase from "@/lib/supabaseServer";
-
-// --- HELPERS ---
-
-async function getBotAPI(botId: string) {
-  try {
-    return BotRuntimeManager.getInstance().getBotAPI(botId);
-  } catch (error) {
-    throw new Error(`Bot connection not found for ID: ${botId}`);
-  }
-}
+import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
+import { resolveBotIdentityId } from "./chat.actions";
 
 /**
- * [REFACTORED V6] Lấy thông tin chi tiết hội thoại
- * Sử dụng conversation_members để xác định external_thread_id thay vì bảng mappings cũ.
+ * Action: Lấy chi tiết hội thoại (Enrichment)
+ * Logic: Two-Tier Fetching (Basic -> Role Check -> Advanced)
  */
-export async function getThreadDetailsAction(botId: string, threadId: string) {
+export async function getThreadDetailsAction(
+  botId: string,
+  threadUuid: string,
+) {
   try {
-    // 1. Tìm Conversation ID từ Routing Key (threadId)
-    // Ưu tiên tìm trong conversation_members của Bot để lấy ID thực tế mà Bot đang dùng để chat
+    // 1. Resolve Identity & Context
+    const identityId = await resolveBotIdentityId(botId);
+
     const { data: member } = await supabase
       .from("conversation_members")
-      .select("conversation_id, thread_id")
-      .eq("identity_id", botId)
-      .eq("thread_id", threadId)
+      .select(
+        "thread_id, conversation:conversations(id, type, global_group_id)",
+      )
+      .eq("identity_id", identityId)
+      .eq("conversation_id", threadUuid)
       .single();
 
-    // Fallback: Tìm theo global_group_id nếu là Group
-    let conversationId = member?.conversation_id;
-    let externalId = member?.thread_id; // Đây chính là ID dùng để gọi API Zalo
-
-    if (!conversationId) {
-      const { data: conv } = await supabase
-        .from("conversations")
-        .select("id, global_group_id")
-        .eq("global_group_id", threadId)
-        .single();
-
-      if (conv) {
-        conversationId = conv.id;
-        externalId = conv.global_group_id;
-      }
+    if (!member || !member.thread_id) {
+      throw new Error("Không tìm thấy kết nối hội thoại (Thread ID missing).");
     }
 
-    if (!conversationId) throw new Error("Conversation not found");
+    const threadId = member.thread_id;
+    const conversation = member.conversation as any;
+    const type = conversation.type; // 'group' | 'private'
 
-    // 2. Lấy thông tin chi tiết từ bảng conversations
-    const { data: convInfo } = await supabase
-      .from("conversations")
-      .select("*")
-      .eq("id", conversationId)
-      .single();
+    const api = await BotRuntimeManager.getInstance().getBotAPI(identityId);
+    if (!api) throw new Error("Bot offline");
 
-    if (!convInfo) throw new Error("Conversation Data Missing");
+    let finalRawData: any = {};
 
-    let extraInfo: any = {};
+    // 3. Logic phân nhánh theo loại hội thoại
+    if (type === "group") {
+      // =================================================================
+      // TIER 1: Truy vấn thông tin cơ bản
+      // =================================================================
+      console.log(`[ThreadDetails] 1️⃣ Fetching Basic Group Info: ${threadId}`);
 
-    // 3. Nếu là Group -> Gọi API Zalo để lấy realtime info (Admin, Member Count)
-    // Điều kiện: Phải có botId active và externalId hợp lệ
-    if (convInfo.type === "group" && botId && externalId) {
-      try {
-        const api = BotRuntimeManager.getInstance().getBotAPI(botId);
-        // Gọi API lấy info nhóm
-        const groupInfoRes = (await api.getGroupInfo([
-          externalId,
-        ])) as unknown as GroupInfoResponse;
+      const groupInfoRes = await api.getGroupInfo(threadId);
 
-        const gData = groupInfoRes?.gridInfoMap?.[externalId];
+      // [FIX] Cast về any để tránh lỗi TS Union Type
+      const basicInfo: any = groupInfoRes.gridInfoMap
+        ? groupInfoRes.gridInfoMap[threadId]
+        : groupInfoRes;
 
-        if (gData) {
-          extraInfo = {
-            admins: gData.adminIds || [],
-            membersCount: gData.totalMember || 0,
-            desc: gData.desc,
-            // Map thêm các trường khác nếu cần
-          };
+      if (!basicInfo) {
+        throw new Error("Không lấy được thông tin nhóm từ Zalo.");
+      }
+
+      // Role Check
+      const ownId = api.getOwnId();
+      // [FIX] Access properties safely via any cast
+      const creatorId = basicInfo.creatorId;
+      const adminIds = basicInfo.adminIds || [];
+
+      const isCreator = ownId === creatorId;
+      // adminIds có thể là undefined trong 1 số trường hợp, cần optional check
+      const isAdmin = Array.isArray(adminIds) && adminIds.includes(ownId);
+      const hasAdminRights = isCreator || isAdmin;
+
+      finalRawData = {
+        ...basicInfo,
+        _role: {
+          isCreator,
+          isAdmin,
+          hasAdminRights,
+        },
+      };
+
+      // =================================================================
+      // TIER 2: Truy vấn nâng cao (Admin/Creator Only)
+      // =================================================================
+      if (hasAdminRights) {
+        console.log(
+          `[ThreadDetails] 2️⃣ Authorized (${
+            isCreator ? "Creator" : "Admin"
+          }). Fetching Advanced Info...`,
+        );
+
+        // 2.1 Link tham gia nhóm
+        try {
+          const linkInfo = await api.getGroupLinkDetail(threadId);
+          if (linkInfo) {
+            finalRawData.linkJoin = linkInfo;
+          }
+        } catch (e: any) {
+          console.warn(
+            `[ThreadDetails] ⚠️ Failed to get Group Link: ${e.message}`,
+          );
+          // Không push warning vào data để tránh làm rối UI
         }
-      } catch (e) {
-        console.warn("[ThreadAction] Fetch Group API Failed (Non-fatal):", e);
-        // Không throw lỗi để vẫn hiển thị được thông tin từ DB
+
+        // 2.2 Danh sách chặn (API Blocked Member)
+        // [FIX] Gọi đúng signature: (payload, groupId)
+        try {
+          const payload = { page: 1, count: 20 }; // Lấy 20 người đầu tiên
+          const blockedRes = await api.getGroupBlockedMember(payload, threadId);
+          finalRawData.blockedMembers = blockedRes || [];
+        } catch (e: any) {
+          console.warn(
+            `[ThreadDetails] ⚠️ Failed to get Blocked Members: ${e.message}`,
+          );
+        }
+      } else {
+        console.log(
+          `[ThreadDetails] 🚫 Member role detected. Skipping Tier 2 APIs.`,
+        );
       }
+
+      finalRawData._fetchedAt = new Date().toISOString();
+      finalRawData._source = "realtime_action_v2";
+    } else {
+      // =================================================================
+      // LOGIC PRIVATE CHAT
+      // =================================================================
+      console.log(`[ThreadDetails] Fetching Private User Info: ${threadId}`);
+
+      const userInfoRes = await api.getUserInfo(threadId);
+      const userProfile = userInfoRes[threadId] || userInfoRes;
+
+      // 2. Alias
+      let alias = "";
+      try {
+        // [FIX] Sử dụng 'as unknown as any[]' để giải quyết xung đột Type
+        const aliasesResponse = await api.getAliasList();
+        const aliases = aliasesResponse as unknown as any[];
+
+        if (Array.isArray(aliases)) {
+          const aliasObj = aliases.find((a: any) => a.id === threadId);
+          if (aliasObj) alias = aliasObj.displayName;
+        }
+      } catch {}
+
+      finalRawData = {
+        ...userProfile,
+        alias: alias,
+        _fetchedAt: new Date().toISOString(),
+        _source: "realtime_action_v2",
+      };
     }
 
-    return {
-      success: true,
-      data: {
-        ...convInfo,
-        ...extraInfo,
-        externalId: externalId, // Trả về để Client biết ID thực tế
-      },
-    };
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error.message : String(error);
-    return { success: false, error: err };
-  }
-}
+    // 4. Update Database
+    await supabase
+      .from("conversations")
+      .update({
+        raw_data: finalRawData,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", threadUuid);
 
-/**
- * Lấy chi tiết thành viên của một nhóm (cho Sidebar bên phải)
- */
-export async function getGroupMembersAction(botId: string, groupId: string) {
-  try {
-    const api = await getBotAPI(botId);
-
-    // 1. Lấy danh sách ID thành viên
-    const groupInfo = (await api.getGroupInfo([
-      groupId,
-    ])) as unknown as GroupInfoResponse;
-    const groupData = groupInfo.gridInfoMap?.[groupId];
-
-    if (!groupData || !groupData.memVerList) {
-      return [];
-    }
-
-    // 2. Lấy Profile chi tiết (Batch 50 người)
-    // Zalo API giới hạn, nên chỉ lấy 50 người đầu tiên cho UI đỡ lag
-    const memberIds = groupData.memVerList.slice(0, 50);
-
-    const profilesRes = (await api.getGroupMembersInfo(
-      memberIds,
-    )) as unknown as GetGroupMembersInfoResponse;
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const profiles = (profilesRes as any).profiles || profilesRes; // Fallback structure check
-
-    return Object.values(profiles || {});
-  } catch (error: unknown) {
-    console.error("[ThreadAction] Get Members Error:", error);
-    return [];
-  }
-}
-
-/**
- * Rời nhóm
- */
-export async function leaveGroupAction(botId: string, groupId: string) {
-  try {
-    const api = await getBotAPI(botId);
-    await api.leaveGroup(groupId);
-    return { success: true };
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error.message : String(error);
-    return { success: false, error: err };
-  }
-}
-
-/**
- * Xóa bạn bè
- */
-export async function removeFriendAction(botId: string, userId: string) {
-  try {
-    const api = await getBotAPI(botId);
-    await api.removeFriend(userId);
-    return { success: true };
-  } catch (error: unknown) {
-    const err = error instanceof Error ? error.message : String(error);
-    return { success: false, error: err };
+    console.log(`[ThreadDetails] ✅ Success. Data updated for ${threadUuid}`);
+    return { success: true, data: finalRawData };
+  } catch (error: any) {
+    console.error("[ThreadAction] Get Details Critical Error:", error);
+    return { success: false, error: error.message || "Lỗi không xác định" };
   }
 }

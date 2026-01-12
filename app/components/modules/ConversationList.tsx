@@ -1,15 +1,86 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * app/components/modules/ConversationList.tsx
- * [MERGED]
- * - Logic cũ: Search Client, Peers/Presence, Controlled Component.
- * - Logic mới: Render Snippet (Media), Format Time chuẩn.
+ * [FIXED] Prevent "Objects are not valid as a React child" error.
+ * Ensure renderSnippet always returns a string.
  */
 import React, { useMemo } from "react";
 import { ThreadInfo } from "@/lib/types/zalo.types";
 import { Avatar } from "@/app/components/ui/Avatar";
 import { IconSearch } from "@/app/components/ui/Icons";
 import { PresenceState } from "@/lib/hooks/usePresence";
-import { renderSnippet, formatTime } from "@/lib/utils/text-renderer";
+
+// [FIX] Helper render snippet an toàn tuyệt đối
+const renderSnippet = (content: any): string => {
+  if (!content) return "Chưa có tin nhắn";
+
+  // Nếu content là string (legacy), trả về luôn
+  if (typeof content === "string") return content;
+
+  // Nếu content là object NormalizedContent
+  const type = content.type || "unknown";
+  const data = content.data || {};
+
+  try {
+    switch (type) {
+      case "text":
+        // Đảm bảo data.text là string, nếu là object thì stringify hoặc lấy fallback
+        if (typeof data.text === "object") return JSON.stringify(data.text);
+        return String(data.text || "");
+
+      case "image":
+        return "[Hình ảnh]";
+
+      case "sticker":
+        return "[Sticker]";
+
+      case "voice":
+        return "[Tin nhắn thoại]";
+
+      case "video":
+        return "[Video]";
+
+      case "file":
+        return `[File] ${data.fileName || ""}`;
+
+      case "link": // Case gây lỗi (href, thumb, etc.)
+        return `[Link] ${data.title || data.href || ""}`;
+
+      default:
+        // Fallback cho các loại tin chưa support hoặc cấu trúc lạ
+        // Tuyệt đối không trả về object
+        if (data.text) return String(data.text);
+        return `[Tin nhắn ${type}]`;
+    }
+  } catch (e) {
+    console.error("Render Snippet Error:", e);
+    return "[Lỗi hiển thị]";
+  }
+};
+
+const formatTime = (isoString: string) => {
+  if (!isoString) return "";
+  try {
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return ""; // Invalid date check
+
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+
+    if (diff < 24 * 60 * 60 * 1000 && date.getDate() === now.getDate()) {
+      return date.toLocaleTimeString("vi-VN", {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    }
+    return date.toLocaleDateString("vi-VN", {
+      day: "2-digit",
+      month: "2-digit",
+    });
+  } catch {
+    return "";
+  }
+};
 
 export function ConversationList({
   threads,
@@ -30,13 +101,13 @@ export function ConversationList({
   isLoadingThreads: boolean;
   peers?: PresenceState[];
 }) {
-  // [FIX] Lọc hội thoại dựa trên từ khóa tìm kiếm
   const filteredThreads = useMemo(() => {
     if (!searchTerm.trim()) return threads;
     const lowerTerm = searchTerm.toLowerCase();
     return threads.filter(
       (t) =>
-        t.name.toLowerCase().includes(lowerTerm) || t.id.includes(lowerTerm),
+        (t.name || "").toLowerCase().includes(lowerTerm) ||
+        (t.id || "").includes(lowerTerm),
     );
   }, [threads, searchTerm]);
 
@@ -88,25 +159,30 @@ export function ConversationList({
           <div className="p-8 text-center text-gray-500 text-sm flex flex-col items-center gap-2">
             <span>📭</span>
             <span>Không tìm thấy hội thoại nào.</span>
+            <p className="text-xs text-gray-600 mt-2">
+              Nếu mới thêm Bot, hãy chạy &quot;Đồng bộ&quot; trong trang quản
+              lý.
+            </p>
           </div>
         ) : (
           filteredThreads.map((thread) => {
-            // Logic Realtime Presence
+            const isSelected = selectedThread?.uuid === thread.uuid;
+
             const viewers = peers.filter(
-              (p) => p.viewing_thread_id === thread.id,
+              (p) => p.viewing_thread_id === thread.uuid,
             );
             const typers = viewers.filter((p) => p.is_typing);
 
-            // Logic Hien thi Snippet
-            const snippet = renderSnippet(thread.lastMessage);
+            // [SAFEGUARD] Gọi renderSnippet và ép kiểu string
+            const snippet = String(renderSnippet(thread.lastMessage));
             const timeStr = formatTime(thread.lastActivity);
 
             return (
               <button
-                key={thread.id}
+                key={thread.uuid}
                 onClick={() => onSelectThread(thread)}
                 className={`flex w-full items-center gap-3 p-3 text-left transition-colors border-l-4 group ${
-                  selectedThread?.id === thread.id
+                  isSelected
                     ? "bg-gray-700/50 border-blue-500"
                     : "border-transparent hover:bg-gray-800"
                 }`}
@@ -131,9 +207,7 @@ export function ConversationList({
                   <div className="flex justify-between items-baseline mb-0.5">
                     <h3
                       className={`truncate font-medium text-sm pr-2 ${
-                        selectedThread?.id === thread.id
-                          ? "text-white"
-                          : "text-gray-200"
+                        isSelected ? "text-white" : "text-gray-200"
                       }`}
                     >
                       {thread.name}
@@ -151,17 +225,12 @@ export function ConversationList({
                           {typers[0].username} đang soạn...
                         </span>
                       ) : (
-                        // [UPDATED] Hiển thị snippet thay vì ID
                         <span
                           className={
                             thread.lastMessage?.type !== "text" ? "italic" : ""
                           }
                         >
-                          {snippet || (
-                            <span className="opacity-50 text-[10px]">
-                              Chưa có tin nhắn
-                            </span>
-                          )}
+                          {snippet}
                         </span>
                       )}
                     </div>
@@ -175,17 +244,9 @@ export function ConversationList({
                             className="relative w-4 h-4 rounded-full ring-1 ring-gray-800"
                             title={viewer.full_name}
                           >
-                            {viewer.avatar ? (
-                              <img
-                                src={viewer.avatar}
-                                className="w-full h-full rounded-full object-cover"
-                                alt=""
-                              />
-                            ) : (
-                              <div className="w-full h-full bg-purple-600 rounded-full flex items-center justify-center text-[8px] text-white font-bold">
-                                {viewer.username.charAt(0).toUpperCase()}
-                              </div>
-                            )}
+                            <div className="w-full h-full bg-purple-600 rounded-full flex items-center justify-center text-[8px] text-white font-bold">
+                              {(viewer.username || "?").charAt(0).toUpperCase()}
+                            </div>
                           </div>
                         ))}
                       </div>

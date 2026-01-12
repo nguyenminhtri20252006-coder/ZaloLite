@@ -250,14 +250,20 @@ export interface AccountInfo {
 
 export interface ThreadInfo {
   id: string;
-  uuid?: string;
+  uuid: string;
+
   name: string;
   avatar: string;
-  type: 0 | 1;
-  lastActivity?: string;
-  // [MERGED] Added for ConversationList UI
-  lastMessage?: NormalizedContent;
-  unreadCount?: number;
+  type: ThreadType;
+
+  lastActivity: string; // ISO Date
+  lastMessage?: NormalizedContent; // Snippet
+
+  unreadCount: number;
+
+  // Optional: Metadata
+  isPinned?: boolean;
+  isHidden?: boolean;
 }
 
 export type UserCacheEntry = {
@@ -314,11 +320,6 @@ export const ZALO_EVENTS = {
   STATUS_UPDATE: "status_update",
   SESSION_GENERATED: "session_generated",
 } as const;
-
-export enum ThreadType {
-  User = 0,
-  Group = 1,
-}
 
 export type LoginState = "IDLE" | "LOGGING_IN" | "LOGGED_IN" | "ERROR";
 export type ViewState = "chat" | "manage" | "setting" | "crm" | "staff";
@@ -400,18 +401,25 @@ export interface StandardLocation {
   long: number;
   address?: string;
 }
+export type ThreadType = 0 | 1;
 
 // [FIX] Normalized Content Wrapper (Added 'location')
-export type NormalizedContent =
-  | { type: "text"; data: { text: string; mentions?: unknown[] } }
-  | { type: "sticker"; data: StandardSticker }
-  | { type: "image"; data: StandardPhoto } // [FIX] Standardized to 'image' (was photo)
-  | { type: "video"; data: StandardVideo }
-  | { type: "voice"; data: StandardVoice }
-  | { type: "link"; data: StandardLink }
-  | { type: "file"; data: StandardFile }
-  | { type: "location"; data: StandardLocation } // [FIX] Added location type
-  | { type: "unknown"; data: { text?: string; raw?: unknown } };
+export interface NormalizedContent {
+  type: "text" | "image" | "sticker" | "voice" | "video" | "file";
+  data: {
+    text?: string;
+    url?: string;
+    caption?: string;
+    // Sticker fields
+    id?: string;
+    cateId?: string;
+    // File fields
+    fileName?: string;
+    fileSize?: number;
+    // Generic
+    [key: string]: any;
+  };
+}
 
 export interface StandardMessage {
   msgId: string;

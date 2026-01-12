@@ -19,36 +19,44 @@ import supabase from "@/lib/supabaseClient";
 interface MessageUI {
   id: string;
   conversation_id: string;
-  sender_id: string;
-  sender_type: "customer" | "bot" | "staff";
+  sender_id: string; // Identity ID
+  sender_type: "customer" | "bot" | "staff" | "system"; // Added 'system'
   content: NormalizedContent;
   sent_at: string;
-  is_self?: boolean;
+
+  // Relations
   sender_identity?: {
-    display_name?: string;
-    name?: string;
+    id: string;
+    display_name?: string; // Tên hiển thị ưu tiên
+    name?: string; // Tên gốc
     avatar?: string;
+    type?: string;
   };
   staff_accounts?: {
     full_name?: string;
     avatar?: string;
   };
+
+  // Fields bổ sung từ DB (nếu có)
+  bot_send_id?: string; // ID của bot thực hiện gửi (đối với staff/system/bot)
 }
 
 interface ChatFrameProps {
-  botId: string;
-  threadId: string; // routing key (group id or user id)
+  botId: string; // Active Bot ID
+  threadId: string; // UUID Conversation
+  displayThreadId?: string;
   threadName: string;
   threadAvatar: string;
+  onToggleDetails?: () => void;
 }
 
 // --- SUB-COMPONENT: MESSAGE BUBBLE ---
 const MessageBubble = ({
   msg,
-  isMine,
+  activeBotId,
 }: {
   msg: MessageUI;
-  isMine: boolean;
+  activeBotId: string;
 }) => {
   const content = msg.content;
   const time = new Date(msg.sent_at).toLocaleTimeString("vi-VN", {
@@ -56,89 +64,90 @@ const MessageBubble = ({
     minute: "2-digit",
   });
 
-  // Hiển thị tên người gửi nếu là nhóm và không phải tin của mình
-  const showName = !isMine;
-  const displayName =
-    msg.sender_type === "staff"
-      ? msg.staff_accounts?.full_name || "Nhân viên"
-      : msg.sender_identity?.display_name ||
-        msg.sender_identity?.name ||
-        "Người dùng";
-  const avatarUrl =
-    msg.sender_type === "staff"
-      ? msg.staff_accounts?.avatar
-      : msg.sender_identity?.avatar;
+  let isRightSide = false;
 
-  // Render nội dung theo Type
+  if (msg.sender_type === "bot") {
+    isRightSide = msg.sender_id === activeBotId;
+  } else if (msg.sender_type === "staff" || msg.sender_type === "system") {
+    isRightSide = msg.bot_send_id === activeBotId;
+  }
+  // Customer luôn bên trái
+
+  // 2. Resolve Display Info (Name & Avatar)
+  let displayName = "Người dùng";
+  let avatarUrl = "";
+
+  if (msg.sender_type === "customer") {
+    displayName =
+      msg.sender_identity?.display_name ||
+      msg.sender_identity?.name ||
+      "Khách hàng";
+    avatarUrl = msg.sender_identity?.avatar || "";
+  } else if (msg.sender_type === "staff") {
+    displayName = msg.staff_accounts?.full_name || "Nhân viên";
+    avatarUrl = msg.staff_accounts?.avatar || "";
+  } else if (msg.sender_type === "bot") {
+    displayName = msg.sender_identity?.display_name || "Bot";
+    avatarUrl = msg.sender_identity?.avatar || "";
+  } else if (msg.sender_type === "system") {
+    displayName = "Hệ thống";
+    // System có thể không cần avatar hoặc dùng icon default
+  }
+
+  // 3. Render Content Logic
+  // 3. Render Content Logic
   const renderContent = () => {
-    switch (content.type) {
+    if (!content) return <div>[Lỗi hiển thị]</div>;
+    const type = content.type || "text";
+    const data = content.data || {};
+
+    switch (type) {
       case "text":
         return (
-          <div className="whitespace-pre-wrap break-words">
-            {/* Cast to any to avoid strict TS if data type varies */}
-            {(content.data as any).text}
-          </div>
+          <div className="whitespace-pre-wrap break-words">{data.text}</div>
         );
-
       case "image":
-        const photoData = content.data as any; // Cast for UI flexibility
-        const imgUrl = photoData.url?.startsWith("http")
-          ? `/api/media-proxy?url=${encodeURIComponent(photoData.url)}`
-          : photoData.url;
         return (
-          <div className="relative max-w-sm rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700">
+          <div className="max-w-xs">
             <img
-              src={imgUrl}
-              alt="Sent image"
-              className="w-full h-auto object-cover"
+              src={data.url}
+              alt="sent"
+              className="rounded-lg w-full h-auto"
               loading="lazy"
             />
-            {photoData.caption && (
-              <p className="p-2 text-sm bg-black/50 text-white absolute bottom-0 w-full">
-                {photoData.caption}
-              </p>
-            )}
           </div>
         );
-
       case "sticker":
-        // [FIX] Handle various sticker URL properties safely
-        const stickerData = content.data as any;
-        const stickerUrl = stickerData.url || stickerData.stickerUrl;
         return (
           <img
-            src={stickerUrl}
-            alt="Sticker"
-            className="w-32 h-32 object-contain"
+            src={data.url || data.stickerUrl}
+            alt="sticker"
+            className="w-24 h-24 object-contain"
           />
         );
-
-      case "voice":
-        const voiceData = content.data as any;
-        const voiceUrl = voiceData.url?.startsWith("http")
-          ? `/api/media-proxy?url=${encodeURIComponent(voiceData.url)}`
-          : voiceData.url;
-        return (
-          <div className="flex items-center gap-2 min-w-[200px]">
-            <Icons.Microphone className="w-5 h-5 text-current" />
-            <audio controls className="h-8 w-48 max-w-full" src={voiceUrl} />
-          </div>
-        );
-
       default:
-        return (
-          <div className="italic text-sm text-gray-500">
-            [Tin nhắn {content.type} chưa hỗ trợ hiển thị]
-          </div>
-        );
+        return <div className="italic text-sm">[Tin nhắn {type}]</div>;
     }
   };
 
+  // 4. Styles
+  const bubbleClass = isRightSide
+    ? "bg-blue-600 text-white rounded-tr-none"
+    : "bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-tl-none";
+
+  // Style đặc biệt cho System Message
+  const systemStyle =
+    msg.sender_type === "system"
+      ? "border-2 border-yellow-500/50 bg-yellow-900/10 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300"
+      : "";
+
   return (
     <div
-      className={`flex gap-2 mb-4 ${isMine ? "flex-row-reverse" : "flex-row"}`}
+      className={`flex gap-3 mb-4 ${
+        isRightSide ? "flex-row-reverse" : "flex-row"
+      }`}
     >
-      {/* Avatar */}
+      {/* Avatar (Luôn hiện, trừ khi là System có thể ẩn nếu muốn) */}
       <Avatar
         src={avatarUrl}
         name={displayName}
@@ -147,24 +156,22 @@ const MessageBubble = ({
 
       <div
         className={`flex flex-col max-w-[70%] ${
-          isMine ? "items-end" : "items-start"
+          isRightSide ? "items-end" : "items-start"
         }`}
       >
-        {showName && (
-          <span className="text-xs text-gray-500 mb-1 ml-1">{displayName}</span>
-        )}
+        {/* Name Label (Hiện cho Staff, Customer, Other Bots. Ẩn cho Current Bot để gọn?) */}
+        {/* User yêu cầu: Staff hiển thị tên. Customer hiển thị tên. */}
+        <span className="text-[10px] text-gray-500 mb-1 px-1">
+          {displayName} {msg.sender_type === "staff" && " (NV)"}
+        </span>
 
         <div
-          className={`px-4 py-2 rounded-2xl ${
-            isMine
-              ? "bg-blue-600 text-white rounded-tr-none"
-              : "bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-tl-none"
-          }`}
+          className={`px-4 py-2 rounded-2xl shadow-sm ${bubbleClass} ${systemStyle}`}
         >
           {renderContent()}
         </div>
 
-        <span className="text-[10px] text-gray-400 mt-1 px-1">{time}</span>
+        <span className="text-[9px] text-gray-400 mt-1 px-1">{time}</span>
       </div>
     </div>
   );
@@ -177,6 +184,7 @@ export default function ChatFrame({
   threadId,
   threadName,
   threadAvatar,
+  onToggleDetails,
 }: ChatFrameProps) {
   const [messages, setMessages] = useState<MessageUI[]>([]);
   const [loading, setLoading] = useState(true);
@@ -194,11 +202,12 @@ export default function ChatFrame({
     setLoading(true);
     try {
       const data = await getMessagesAction(botId, threadId);
-      // Ép kiểu về MessageUI (Backend trả về Raw Data có join)
-      setMessages(data as any);
+      // [SAFEGUARD] Nếu data null hoặc rỗng, set mảng rỗng
+      setMessages(Array.isArray(data) ? (data as any) : []);
       setTimeout(scrollToBottom, 100);
     } catch (error) {
       console.error("Fetch msg error:", error);
+      setMessages([]);
     } finally {
       setLoading(false);
     }
@@ -210,22 +219,29 @@ export default function ChatFrame({
 
   // 2. Realtime Subscription
   useEffect(() => {
-    if (!botId) return;
+    if (!botId || !threadId) return;
 
     // Kênh realtime lắng nghe bảng messages
     const channel = supabase
-      .channel(`chat:${botId}:${threadId}`)
+      .channel(`chat_room:${threadId}`)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
           schema: "public",
           table: "messages",
-          // Không filter theo conversation_id ở đây vì Supabase Realtime filter hạn chế
-          // Ta filter ở callback
+          filter: `conversation_id=eq.${threadId}`,
         },
-        (payload) => {
+        async (payload) => {
           const newMsg = payload.new as MessageUI;
+
+          // [OPTIMIZATION]
+          // Payload realtime chỉ trả về dữ liệu thô (raw row).
+          // Ta cần join để lấy thông tin sender_identity hoặc staff_accounts để hiển thị đẹp.
+          // Tuy nhiên, để nhanh, ta có thể fake tạm info nếu biết logic, hoặc fetch lại single row.
+          // Ở đây chấp nhận hiển thị thô tạm thời, hoặc reload nhẹ.
+          // Để UX tốt nhất: Ta add vào list, nếu thiếu info Avatar thì nó sẽ hiện Placeholder.
+
           setMessages((prev) => {
             // Tránh duplicate nếu mình vừa gửi (cần logic optimistic ID nếu làm kỹ)
             if (prev.find((m) => m.id === newMsg.id)) return prev;
@@ -239,7 +255,7 @@ export default function ChatFrame({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [botId, threadId, supabase]);
+  }, [botId, threadId]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -307,8 +323,7 @@ export default function ChatFrame({
     if (!staff?.id) return;
     setIsSending(true);
     try {
-      // Optimistic Update (Optional): Thêm tin nhắn ảo vào list ngay lập tức
-      // Ở đây ta chờ Realtime phản hồi để đơn giản hóa
+      // Gửi tin nhắn
       const res = await sendMessageAction(
         staff.id,
         botId,
@@ -316,12 +331,9 @@ export default function ChatFrame({
         threadId,
         0,
       );
-
-      if (!res.success) {
-        alert("Gửi thất bại: " + res.error);
-      }
-    } catch (error) {
-      console.error("Send Error:", error);
+      if (!res.success) alert("Gửi thất bại: " + res.error);
+    } catch (e) {
+      console.error(e);
     } finally {
       setIsSending(false);
       scrollToBottom();
@@ -331,7 +343,7 @@ export default function ChatFrame({
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-900">
       {/* Header */}
-      <div className="h-16 border-b flex items-center px-4 justify-between bg-white dark:bg-gray-900 z-10">
+      <div className="h-16 border-b flex items-center px-4 justify-between bg-white dark:bg-gray-900 z-10 shadow-sm">
         <div className="flex items-center gap-3">
           <Avatar src={threadAvatar} name={threadName} className="w-10 h-10" />
           <div>
@@ -344,90 +356,69 @@ export default function ChatFrame({
             </span>
           </div>
         </div>
+
+        {/* Actions */}
+        <div className="flex items-center gap-2">
+          {onToggleDetails && (
+            <button
+              onClick={onToggleDetails}
+              className="p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
+              title="Thông tin hội thoại"
+            >
+              <Icons.Info className="w-6 h-6" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Message List */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50 dark:bg-gray-950">
+      <div className="flex-1 overflow-y-auto p-4 bg-gray-50 dark:bg-gray-950">
         {loading ? (
-          <div className="text-center py-10 text-gray-400">
+          <div className="flex h-full items-center justify-center text-gray-400">
             Đang tải tin nhắn...
           </div>
         ) : messages.length === 0 ? (
-          <div className="text-center py-10 text-gray-400">
-            Chưa có tin nhắn nào.
+          <div className="flex h-full items-center justify-center text-gray-400 flex-col gap-2">
+            <span>💬</span>
+            <span>Chưa có tin nhắn nào</span>
           </div>
         ) : (
-          messages.map((msg) => {
-            const isMine =
-              msg.sender_type === "staff" ||
-              (msg.sender_type === "bot" && msg.sender_id === botId);
-
-            return <MessageBubble key={msg.id} msg={msg} isMine={isMine} />;
-          })
+          messages.map((msg) => (
+            <MessageBubble key={msg.id} msg={msg} activeBotId={botId} />
+          ))
         )}
         <div ref={messagesEndRef} />
       </div>
 
       {/* Input Area */}
       <div className="p-4 bg-white dark:bg-gray-900 border-t">
-        <div className="flex items-end gap-2 max-w-4xl mx-auto">
-          {/* File Upload Trigger */}
+        <div className="flex items-center gap-2 max-w-4xl mx-auto">
           <input
-            type="file"
-            ref={fileInputRef}
-            className="hidden"
-            onChange={handleFileChange}
-            accept="image/*,video/*,audio/*,.pdf,.doc,.docx"
+            className="flex-1 bg-gray-100 dark:bg-gray-800 dark:text-white p-3 rounded-full outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
+            placeholder="Nhập tin nhắn..."
+            disabled={isSending}
           />
           <button
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
-            className="p-3 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
-            title="Đính kèm file"
-          >
-            {isUploading ? (
-              <Icons.Loader className="w-6 h-6 animate-spin" />
-            ) : (
-              <Icons.Paperclip className="w-6 h-6" />
-            )}
-          </button>
-
-          {/* Text Input */}
-          <div className="flex-1 bg-gray-100 dark:bg-gray-800 rounded-2xl px-4 py-2 flex items-center">
-            <textarea
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage();
-                }
-              }}
-              placeholder="Nhập tin nhắn..."
-              className="w-full bg-transparent border-none focus:ring-0 outline-none resize-none max-h-32 py-2"
-              rows={1}
-            />
-          </div>
-
-          {/* Send Button */}
-          <button
             onClick={handleSendMessage}
-            disabled={(!inputText.trim() && !isUploading) || isSending}
-            className={`p-3 rounded-full transition-all ${
-              inputText.trim() || isUploading
-                ? "bg-blue-600 text-white hover:bg-blue-700 shadow-md"
-                : "bg-gray-200 text-gray-400 cursor-not-allowed"
+            disabled={!inputText.trim() || isSending}
+            className={`p-3 rounded-full transition-colors ${
+              !inputText.trim()
+                ? "bg-gray-200 text-gray-400"
+                : "bg-blue-600 text-white hover:bg-blue-700"
             }`}
           >
             {isSending ? (
-              <Icons.Loader className="w-6 h-6 animate-spin" />
+              <Icons.Loader className="w-5 h-5 animate-spin" />
             ) : (
-              <Icons.Send className="w-6 h-6" />
+              <Icons.Send className="w-5 h-5" />
             )}
           </button>
         </div>
-        <div className="text-center mt-2 text-xs text-gray-400">
-          Hỗ trợ: Enter để gửi, Shift+Enter xuống dòng.
+        <div className="text-center mt-2 text-[10px] text-gray-400">
+          Enter để gửi
         </div>
       </div>
     </div>
