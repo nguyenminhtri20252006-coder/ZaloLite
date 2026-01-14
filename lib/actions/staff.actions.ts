@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
 /**
  * lib/actions/staff.actions.ts
- * [SECURITY UPDATE V2.2 - FIX TYPES & MIDDLEWARE SYNC]
- * - Fix: TypeScript error fix for return types.
- * - Logic: Strict typing for session checks.
+ * [CLEANUP V3.1 - REMOVE SUPABASE BRIDGE]
+ * - Removed: 'sb-access-token' generation logic.
+ * - Reverted to: Pure Custom Auth (Cookie 'staff_session').
  */
 
 "use server";
@@ -25,6 +26,11 @@ type BotPermissionType = "owner" | "chat" | "view_only";
 const COOKIE_NAME = "staff_session";
 const SESSION_DURATION = 4 * 60 * 60 * 1000;
 
+export type LoginState = {
+  error?: string;
+  success?: boolean;
+};
+
 type SessionPayload = {
   id: string;
   username: string;
@@ -33,11 +39,6 @@ type SessionPayload = {
   avatar?: string | null;
   phone?: string | null;
   expiresAt: number;
-};
-
-export type LoginState = {
-  error?: string;
-  success?: boolean;
 };
 
 // --- SESSION HELPERS ---
@@ -145,6 +146,7 @@ export async function staffLoginAction(
 
     const token = createSessionToken(payload);
     const cookieStore = await cookies();
+
     cookieStore.set(COOKIE_NAME, token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -152,6 +154,8 @@ export async function staffLoginAction(
       path: "/",
       sameSite: "lax",
     });
+
+    // [CLEANUP] Không còn set cookie 'sb-access-token' nữa
 
     // [SYS] Ghi nhận Session bắt đầu
     await startWorkSession(staff.id, token);
@@ -182,6 +186,7 @@ export async function staffLogoutAction() {
   }
 
   cookieStore.delete(COOKIE_NAME);
+  // [CLEANUP] Không cần delete 'sb-access-token' nữa
   redirect("/login");
 }
 

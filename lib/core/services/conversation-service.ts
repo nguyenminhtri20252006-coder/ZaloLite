@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
 /**
  * lib/core/services/conversation-service.ts
- * [CORE SERVICE - V9.0 STRICT MAPPING]
- * - GroupID: Lưu GlobalID vào DB, nhưng thread_id là NumericID.
- * - Private: Mapping theo participant_ids.
+ * [CORE SERVICE - V10.0 ATOMIC MAPPING]
+ * - Fix: Upsert Private Chat now automatically maps `thread_id` for Bot.
+ * - Logic: Ensure conversation_members always has the correct External UID for routing.
  */
 
 import supabase from "@/lib/supabaseServer";
@@ -11,11 +12,11 @@ import supabase from "@/lib/supabaseServer";
 export class ConversationService {
   /**
    * Tạo hoặc cập nhật Nhóm
-   * LOGIC MỚI:
-   * - global_group_id: Lưu GlobalID (Chuỗi mã hóa, VD: J5P1...)
+   * - global_group_id: GlobalID (String) -> Unique Key
+   * - thread_id: NumericID (String) -> Routing Key
    */
   static async upsertGroupConversation(
-    globalGroupId: string, // [FIX] Global ID (String)
+    globalGroupId: string,
     name: string,
     avatar: string,
     rawInfo: any,
@@ -27,7 +28,7 @@ export class ConversationService {
       .upsert(
         {
           type: "group",
-          global_group_id: globalGroupId, // <--- ID Duy nhất toàn cục
+          global_group_id: globalGroupId,
           name: name,
           avatar: avatar,
           raw_data: rawInfo,
@@ -39,78 +40,97 @@ export class ConversationService {
       .single();
 
     if (error) {
-      console.error(
-        `[ConvService] Upsert Group Error (${globalGroupId}):`,
-        error.message,
-      );
+      console.error(`[ConvService] Upsert Group Error:`, error.message);
       return null;
     }
     return conv?.id;
   }
 
   /**
-   * Upsert Private Conversation
-   * Logic không đổi: Dựa vào cặp participant_ids (Internal UUIDs)
+   * Upsert Private Conversation (Atomic Logic)
+   * [UPDATE] Now accepts `friendExternalId` to ensure Routing Key is saved immediately.
    */
   static async upsertPrivateConversation(
     botId: string,
     friendIdentityId: string,
     friendName: string,
     friendAvatar: string,
-    rawData: any = {}, // [NEW PARAM]
+    rawData: any = {},
+    friendExternalId: string | null = null, // [CRITICAL PARAM] UID số (thread_id)
   ) {
     const participants = [botId, friendIdentityId];
+    let conversationId: string | null = null;
 
+    // 1. Check Existing
     const { data: existingConv } = await supabase
       .from("conversations")
       .select("id")
       .eq("type", "private")
       .contains("participant_ids", participants)
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (existingConv) {
+      // Update info
       await supabase
         .from("conversations")
         .update({
           name: friendName,
           avatar: friendAvatar,
-          raw_data: rawData, // [UPDATE RAW]
+          raw_data: rawData,
           last_activity_at: new Date().toISOString(),
         })
         .eq("id", existingConv.id);
-      return existingConv.id;
+      conversationId = existingConv.id;
+    } else {
+      // Create New
+      const { data: newConv, error } = await supabase
+        .from("conversations")
+        .insert({
+          type: "private",
+          global_group_id: null,
+          name: friendName,
+          avatar: friendAvatar,
+          participant_ids: participants,
+          raw_data: rawData,
+          updated_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+        })
+        .select("id")
+        .single();
+
+      if (!error && newConv) conversationId = newConv.id;
     }
 
-    const { data: newConv, error } = await supabase
-      .from("conversations")
-      .insert({
-        type: "private",
-        global_group_id: null,
-        name: friendName,
-        avatar: friendAvatar,
-        participant_ids: participants,
-        raw_data: rawData, // [INSERT RAW]
-        updated_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-      })
-      .select("id")
-      .single();
+    // 2. [AUTO-MAPPING] Ensure Members exist with correct ThreadID
+    if (conversationId && friendExternalId) {
+      // Add Bot (Observer) -> Needs thread_id (friendExternalId) to route messages
+      await this.addMember(conversationId, botId, "admin", friendExternalId);
 
-    if (error) return null;
-    return newConv?.id;
+      // Add Friend (Target) -> thread_id is null (or specific if needed)
+      await this.addMember(conversationId, friendIdentityId, "member", null);
+    } else if (conversationId) {
+      // Fallback for legacy calls without external ID
+      // We only ensure membership exists
+      await this.addMember(conversationId, botId, "admin", null);
+      await this.addMember(conversationId, friendIdentityId, "member", null);
+    }
+
+    return conversationId;
   }
 
   /**
    * Thêm thành viên vào hội thoại
-   * @param threadId: [FIX] Đây là ID dùng để Router (UID số hoặc GroupID số)
+   * @param threadId: External UID (Routing Key) - Quan trọng cho Bot nhận tin
    */
   static async addMember(
     conversationId: string,
     identityId: string,
     role: string = "member",
-    threadId: string | null = null, // <--- Numeric ID lưu ở đây
+    threadId: string | null = null,
   ) {
+    // Only update if thread_id is provided or row missing
+    // upsert logic handles strict updates
     const { error } = await supabase.from("conversation_members").upsert(
       {
         conversation_id: conversationId,

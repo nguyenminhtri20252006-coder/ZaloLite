@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
 "use client";
 
 import { useState, useRef, useEffect } from "react";
@@ -50,16 +51,16 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [showDetails, setShowDetails] = useState(false);
 
-  // 4. Presence Hook (Call unconditionally with fallback values)
+  // 4. Presence & Realtime Debug
   const { peers, updateStatus } = usePresence({
-    staffId: staffInfo?.id || "guest", // Safe fallback
+    staffId: staffInfo?.id || "guest",
     username: staffInfo?.username || "Guest",
     fullName: staffInfo?.name || "Guest",
     role: staffInfo?.role || "staff",
     avatar: staffInfo?.avatar || "",
   });
 
-  // [AUTH GUARD EFFECT] Check redirect logic
+  // [AUTH GUARD EFFECT]
   useEffect(() => {
     if (!staffInfo) {
       console.warn("No Staff Info. Redirecting to login...");
@@ -70,7 +71,7 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
   // [FETCH DATA EFFECTS]
   // 1. Fetch Bots
   const fetchBots = async () => {
-    if (!staffInfo) return; // Guard inside function
+    if (!staffInfo) return;
     try {
       const data = await getBotsAction();
       setBots(data);
@@ -86,7 +87,7 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
 
   useEffect(() => {
     if (staffInfo) fetchBots();
-  }, [staffInfo]); // Only run if staffInfo exists
+  }, [staffInfo]);
 
   // 2. Fetch Threads
   const fetchThreads = async () => {
@@ -110,9 +111,11 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
     }
   }, [activeBotId]);
 
-  // 3. Realtime Handler
+  // 3. Realtime Handler (Channel Logic)
   useEffect(() => {
     if (!activeBotId || !staffInfo) return;
+
+    console.log(`[Realtime] 🔌 Subscribing to Bot Channel: ${activeBotId}`);
 
     const channel = supabase.channel(`live-chat-list:${activeBotId}`);
 
@@ -134,12 +137,16 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
       { event: "INSERT", schema: "public", table: "messages" },
       async (payload) => {
         const newMsgRow = payload.new as Message;
+        // console.log("[Realtime] 📩 New Message Signal:", newMsgRow.id);
+
         if (!newMsgRow.conversation_id) return;
         const convUuid = newMsgRow.conversation_id;
-        const exists = threads.some((t) => t.uuid === convUuid);
 
-        if (exists) {
-          setThreads((prev) => {
+        // Cập nhật danh sách hội thoại
+        setThreads((prev) => {
+          const exists = prev.some((t) => t.uuid === convUuid);
+          if (exists) {
+            // Move to top & Update Last Msg
             const idx = prev.findIndex((t) => t.uuid === convUuid);
             if (idx === -1) return prev;
             const target = prev[idx];
@@ -151,8 +158,16 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
             const newList = [...prev];
             newList.splice(idx, 1);
             return [updated, ...newList];
-          });
-        } else {
+          } else {
+            // Fetch new thread info if missing (Async inside Sync state is tricky, use effect or fetch)
+            // Tạm thời chỉ return prev, fetchThreads sẽ được trigger nếu cần hoặc handle async riêng
+            return prev;
+          }
+        });
+
+        // Nếu hội thoại mới chưa có trong list, fetch lại nhẹ
+        const exists = threads.some((t) => t.uuid === convUuid);
+        if (!exists) {
           const newThreadInfo = await getSingleThreadAction(
             activeBotId,
             convUuid,
@@ -195,8 +210,12 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
       },
     );
 
-    channel.subscribe();
+    channel.subscribe((status) => {
+      console.log(`[Realtime] Channel live-chat-list Status: ${status}`);
+    });
+
     return () => {
+      console.log(`[Realtime] Unsubscribing...`);
       supabase.removeChannel(channel);
     };
   }, [activeBotId, threads, staffInfo]);
@@ -237,7 +256,7 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
     };
   }, [resizingTarget, botListWidth]);
 
-  // [CONDITIONAL RENDER - AFTER ALL HOOKS]
+  // [CONDITIONAL RENDER]
   if (!staffInfo) {
     return (
       <div className="flex h-full w-full items-center justify-center bg-gray-900 text-gray-400">
@@ -246,6 +265,7 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
     );
   }
 
+  // --- UI RENDER ---
   return (
     <div
       className="flex h-full w-full overflow-hidden bg-gray-900"

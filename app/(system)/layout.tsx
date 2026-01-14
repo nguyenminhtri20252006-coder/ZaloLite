@@ -2,7 +2,8 @@ import { getStaffSession } from "@/lib/actions/staff.actions";
 import { redirect } from "next/navigation";
 import { ReactNode } from "react";
 import { MainMenu } from "@/app/components/modules/MainMenu";
-import { SSEProvider } from "@/app/context/SSEContext"; // [NEW]
+import { SSEProvider } from "@/app/context/SSEContext";
+// [CLEANUP] Remove SupabaseAuthProvider import
 
 export default async function SystemLayout({
   children,
@@ -20,7 +21,6 @@ export default async function SystemLayout({
   };
 
   // 2. Render Layout with Sidebar
-  // LƯU Ý: Không truyền function props (onToggleMenu, etc) vào MainMenu vì đây là Server Component
   return (
     <div className="flex h-screen w-full bg-gray-900 text-gray-100 overflow-hidden">
       {/* GLOBAL SIDEBAR (Fixed) */}
@@ -30,7 +30,7 @@ export default async function SystemLayout({
 
       {/* MAIN CONTENT AREA */}
       <main className="flex-1 relative h-full w-full overflow-hidden">
-        {/* [NEW] Bọc SSE Provider ở đây để giữ kết nối khi chuyển trang trong System */}
+        {/* [CLEANUP] Remove SupabaseAuthProvider wrapper */}
         <SSEProvider>{children}</SSEProvider>
       </main>
     </div>

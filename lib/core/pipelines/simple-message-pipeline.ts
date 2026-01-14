@@ -37,7 +37,6 @@ export class SimpleMessagePipeline {
 
       // Msg ID
       const zaloMsgId = data.msgId || data.cliMsgId || `${Date.now()}`;
-
       DebugLogger.logPipeline("Extract", `Resolved IDs`, {
         uidFrom,
         threadId,

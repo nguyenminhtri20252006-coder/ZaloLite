@@ -1,17 +1,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { API } from "zca-js";
+import { sseManager } from "@/lib/core/sse-manager";
 import { SimpleMessagePipeline } from "@/lib/core/pipelines/simple-message-pipeline";
 import { InteractionHandler } from "./handlers/interaction-handler";
 import { GroupHandler } from "./handlers/group-handler";
 import { EphemeralHandler } from "./handlers/ephemeral-handler";
 import { DebugLogger } from "@/lib/utils/debug-logger"; // Import Logger
-
+import { AdvancedMessagePipeline } from "@/lib/core/pipelines/advanced-message-pipeline";
+const USE_ADVANCED_PIPELINE = true;
 export class ZaloEventListener {
   private botId: string;
   private api: any;
   private isListening: boolean = false;
 
-  private messagePipeline: SimpleMessagePipeline;
+  private simplePipeline: SimpleMessagePipeline;
+  private advancedPipeline: AdvancedMessagePipeline;
   private interactionHandler: InteractionHandler;
   private groupHandler: GroupHandler;
   private ephemeralHandler: EphemeralHandler;
@@ -19,8 +22,8 @@ export class ZaloEventListener {
   constructor(botId: string, api: API) {
     this.botId = botId;
     this.api = api as any;
-
-    this.messagePipeline = new SimpleMessagePipeline();
+    this.simplePipeline = new SimpleMessagePipeline();
+    this.advancedPipeline = new AdvancedMessagePipeline();
     this.interactionHandler = new InteractionHandler();
     this.groupHandler = new GroupHandler();
     this.ephemeralHandler = new EphemeralHandler();
@@ -50,7 +53,17 @@ export class ZaloEventListener {
       DebugLogger.logEvent(this.botId, "MESSAGE", msg);
 
       try {
-        await this.messagePipeline.process(this.botId, msg);
+        if (USE_ADVANCED_PIPELINE) {
+          console.log(
+            `[Listener] Routing to ADVANCED Pipeline for ${this.botId}`,
+          );
+          await this.advancedPipeline.process(this.botId, msg);
+        } else {
+          console.log(
+            `[Listener] Routing to SIMPLE Pipeline for ${this.botId}`,
+          );
+          await this.simplePipeline.process(this.botId, msg);
+        }
       } catch (e) {
         console.error(`[Listener:${this.botId}] Pipeline Error:`, e);
       }

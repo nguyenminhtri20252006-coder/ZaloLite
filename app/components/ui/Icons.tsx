@@ -35,6 +35,9 @@ import {
   Edit2,
   Mic,
   Loader2,
+  Download,
+  Play,
+  Pause,
 } from "lucide-react";
 
 // Re-export với tên thống nhất để sử dụng trong app
@@ -80,6 +83,9 @@ export const IconTrash = Trash2;
 export const IconEdit = Edit2;
 export const IconMicrophone = Mic;
 export const IconLoader = Loader2;
+export const IconDownload = Download;
+export const IconPlay = Play;
+export const IconPause = Pause;
 
 // --- AGGREGATED EXPORT FOR UI ---
 // Giúp sử dụng kiểu <Icons.Microphone />
@@ -106,4 +112,8 @@ export const Icons = {
   Microphone: IconMicrophone,
   Paperclip: IconAttach,
   Loader: IconLoader,
+  Mic: Mic,
+  Download: Download,
+  Play: Play,
+  Pause: Pause,
 };
