@@ -1,8 +1,8 @@
 import { getStaffSession } from "@/lib/actions/staff.actions";
 import { redirect } from "next/navigation";
 import { ReactNode } from "react";
-import { MainMenu } from "@/app/components/modules/MainMenu";
-import { SSEProvider } from "@/app/context/SSEContext";
+import { MainMenu } from "@/components/modules/MainMenu";
+import { SSEProvider } from "@/context/SSEContext";
 // [CLEANUP] Remove SupabaseAuthProvider import
 
 export default async function SystemLayout({

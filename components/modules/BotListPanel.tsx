@@ -1,8 +1,8 @@
 "use client";
 
 import { ZaloBot } from "@/lib/types/database.types";
-import { Avatar } from "@/app/components/ui/Avatar";
-import { IconRefresh, IconUserPlus } from "@/app/components/ui/Icons";
+import { Avatar } from "@/components/ui/Avatar";
+import { IconRefresh, IconUserPlus } from "@/components/ui/Icons";
 import { Zap } from "lucide-react"; // Import Zap icon
 
 /**

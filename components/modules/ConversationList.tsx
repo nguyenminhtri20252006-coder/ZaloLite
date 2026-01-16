@@ -6,9 +6,9 @@
  */
 import React, { useMemo } from "react";
 import { ThreadInfo } from "@/lib/types/zalo.types";
-import { Avatar } from "@/app/components/ui/Avatar";
-import { IconSearch } from "@/app/components/ui/Icons";
-import { PresenceState } from "@/lib/hooks/usePresence";
+import { Avatar } from "@/components/ui/Avatar";
+import { IconSearch } from "@/components/ui/Icons";
+import { PresenceState } from "@/hooks/usePresence";
 
 // [FIX] Helper render snippet an toàn tuyệt đối
 const renderSnippet = (content: any): string => {

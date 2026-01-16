@@ -3,8 +3,8 @@
 import { useState, useEffect } from "react";
 import { ZaloBot } from "@/lib/types/database.types";
 import { ThreadInfo } from "@/lib/types/zalo.types";
-import { Avatar } from "@/app/components/ui/Avatar";
-import { IconClose, IconRefresh } from "@/app/components/ui/Icons";
+import { Avatar } from "@/components/ui/Avatar";
+import { IconClose, IconRefresh } from "@/components/ui/Icons";
 import { getThreadDetailsAction } from "@/lib/actions/thread.actions";
 
 interface ConversationInfoPanelProps {

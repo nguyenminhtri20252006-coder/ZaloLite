@@ -1,14 +1,22 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+
 /**
  * lib/core/services/sender-service.ts
  * [LAYER 3 - INFRASTRUCTURE]
- * Wrapper gửi tin nhắn qua Zalo API với logic Upload & Self-Sync.
- * Tuân thủ Blueprint V6.3.
+ * Wrapper gửi tin nhắn qua Zalo API với logic Routing & Self-Sync.
+ * [UPDATED] Fix TypeScript errors for NormalizedContent types.
  */
 
 import { API, ThreadType } from "zca-js";
 import supabase from "@/lib/supabaseServer";
-import { NormalizedContent } from "@/lib/types/zalo.types";
+import { NormalizedContent, MediaType } from "@/lib/types/zalo.types";
+
+// [NEW] Interface chuẩn hóa kết quả gửi tin
+export interface SentMessageResult {
+  msgId: string;
+  ts: string | number;
+  cliMsgId?: string;
+}
 
 export class SenderService {
   private static instance: SenderService;
@@ -34,9 +42,6 @@ export class SenderService {
     return this.api;
   }
 
-  /**
-   * 1. HÀM GỐC: Gửi tin nhắn và lưu vào DB (Self-Sync)
-   */
   public async sendMessage(
     conversationId: string,
     content: NormalizedContent,
@@ -44,7 +49,7 @@ export class SenderService {
   ) {
     if (!this.botId) throw new Error("Bot ID not set in SenderService");
 
-    // BƯỚC 1: ROUTING CHECK
+    // --- 1. ROUTING CHECK ---
     const { data: member, error } = await supabase
       .from("conversation_members")
       .select("thread_id")
@@ -54,142 +59,146 @@ export class SenderService {
 
     if (error || !member || !member.thread_id) {
       throw new Error(
-        `Bot chưa tham gia hội thoại này hoặc không có quyền gửi tin. ConvID: ${conversationId}`,
+        `Bot chưa tham gia hội thoại này. ConvID: ${conversationId}`,
       );
     }
 
     const threadId = member.thread_id;
-
     const { data: conv } = await supabase
       .from("conversations")
       .select("type")
       .eq("id", conversationId)
       .single();
+
     const isGroup = conv?.type === "group";
     const zaloType = isGroup ? ThreadType.Group : ThreadType.User;
 
-    console.log(`[Sender] Sending to ${threadId} (Group: ${isGroup})`);
+    console.log(
+      `[SenderService] Sending ${content.type} to ${threadId} (Group: ${isGroup})`,
+    );
 
-    // BƯỚC 2 & 3: UPLOAD & SEND (API Call)
+    // --- 2. SEND VIA API (PAYLOAD MAPPING) ---
     let result: any;
+    const d = content.data; // Shortcut
+    const msgType = content.type as string;
 
     try {
-      switch (content.type) {
+      switch (msgType) {
         case "text":
-          // [FIX] Access via content.data.text
           result = await this.getApi().sendMessage(
-            content.data.text || "",
+            d.text || "",
             threadId,
             zaloType,
           );
           break;
 
         case "sticker":
-          if (!content.data.stickerId) throw new Error("Missing stickerId");
-          // [FIX] Access via content.data.stickerId
-          // [FIX] Removed 'url' property as it is not part of SendStickerPayload
+          if (!d.stickerId) throw new Error("Missing stickerId");
           result = await this.getApi().sendSticker(
             {
-              id: content.data.stickerId,
-              cateId: content.data.cateId || 0,
-              type: content.data.type || 1,
+              id: Number(d.stickerId),
+              cateId: Number(d.cateId || 0),
+              type: 1,
             },
-            threadId,
-            zaloType,
-          );
-          break;
-
-        case "voice":
-          // Voice logic with type casting
-          if (!content.data.url || !content.data.duration) {
-            throw new Error(
-              "Voice message requires url and duration (calculated from client)",
-            );
-          }
-
-          // Ép kiểu any cho payload để tránh lỗi 'url does not exist' nếu type definition thiếu
-          const voicePayload = {
-            url: content.data.url,
-            duration: content.data.duration,
-            size: (content.data as any).size, // Optional
-          } as any;
-
-          result = await this.getApi().sendVoice(
-            voicePayload,
-            threadId,
-            zaloType,
-          );
-          break;
-
-        case "video":
-          // Video logic with type casting
-          if (!content.data.fileId) {
-            throw new Error(
-              "Video message requires fileId (from upload result)",
-            );
-          }
-
-          const videoData = content.data as any;
-
-          const videoPayload = {
-            fileId: videoData.fileId,
-            checksum: videoData.checksum || "",
-            duration: videoData.duration || 0,
-            width: videoData.width || 0,
-            height: videoData.height || 0,
-          } as any;
-
-          result = await this.getApi().sendVideo(
-            videoPayload,
             threadId,
             zaloType,
           );
           break;
 
         case "image":
-          // [IMPLEMENTED] Logic gửi ảnh dựa trên metadata đã upload
-          if (!content.data.photoId && !content.data.url) {
-            throw new Error(
-              "Image message requires photoId or url (from upload result)",
-            );
-          }
-
-          // Construct Payload theo tài liệu ZCA-JS:
-          // Gửi ảnh thực chất là sendMessage với body chứa quote (là attachment data)
-          const imageMsgBody = {
-            msg: content.data.description || "", // Caption
+          // Payload gửi ảnh: msgType='chat.photo' + quote
+          if (!d.photoId && !d.url) throw new Error("Image requires ID or URL");
+          const imgBody = {
+            msg: d.caption || "",
             quote: {
-              // Map fields từ NormalizedContent sang cấu trúc Zalo Attachment
-              href: content.data.url,
-              photoId: content.data.photoId,
-              thumb: content.data.thumbnail,
-              width: content.data.width,
-              height: content.data.height,
-              // Một số version cần thêm normalUrl
-              normalUrl: content.data.url,
+              href: d.url,
+              photoId: d.photoId,
+              thumb: d.thumbnail || d.url,
+              width: Number(d.width || 0),
+              height: Number(d.height || 0),
+              normalUrl: d.url,
             },
           };
-
-          // Gọi api.sendMessage. ZCA-JS sẽ tự detect đây là tin nhắn ảnh dựa trên cấu trúc quote.
           result = await this.getApi().sendMessage(
-            imageMsgBody as any,
+            imgBody as any,
+            threadId,
+            zaloType,
+          );
+          break;
+
+        case "video":
+          if (!d.fileId) throw new Error("Video requires fileId");
+          // Payload gửi video: msgType='chat.video.msg'
+          const vidBody = {
+            msgType: "chat.video.msg",
+            content: {
+              fileId: d.fileId,
+              href: d.url,
+              thumb: d.thumbnail || "",
+              duration: Number(d.duration || 0), // ms
+              width: Number(d.width || 0),
+              height: Number(d.height || 0),
+              fileSize: Number(d.fileSize || 0),
+              checksum: d.checksum || "",
+            },
+          };
+          result = await this.getApi().sendMessage(
+            vidBody as any,
+            threadId,
+            zaloType,
+          );
+          break;
+
+        case "voice":
+        case "audio":
+          // Voice Message Logic:
+          // API yêu cầu { href: string, duration: number (ms) }
+          // Lưu ý: duration phải là số mili-giây.
+          if (!d.url) throw new Error("Voice requires URL");
+          const voiceBody = {
+            msgType: "chat.voice",
+            content: {
+              href: d.url,
+              duration: Number(d.duration || 0),
+            },
+          };
+          result = await this.getApi().sendMessage(
+            voiceBody as any,
+            threadId,
+            zaloType,
+          );
+          break;
+
+        case "file":
+          // Payload gửi file: msgType='chat.file'
+          if (!d.url) throw new Error("File requires URL");
+          const fileBody = {
+            msgType: "chat.file",
+            content: {
+              href: d.url,
+              title: d.fileName || "File",
+              size: Number(d.fileSize || 0),
+              fileId: d.fileId,
+              checksum: d.checksum,
+            },
+          };
+          result = await this.getApi().sendMessage(
+            fileBody as any,
             threadId,
             zaloType,
           );
           break;
 
         default:
-          // [FIX] Safe access
-          throw new Error(
-            `Unsupported message type for sending: ${(content as any).type}`,
-          );
+          // Fallback for types not explicitly handled in switch but present in MediaType
+          throw new Error(`Unsupported message type: ${msgType}`);
       }
     } catch (e) {
-      console.error("[Sender] API Error:", e);
+      console.error("[SenderService] API Fail:", e);
       throw e;
     }
 
-    // BƯỚC 4: SELF-SYNC
+    // --- 3. SELF-SYNC ---
     const msgId = result.msgId || String(Date.now());
     await this.selfSyncMessage(conversationId, msgId, content, staffId);
 
@@ -219,33 +228,125 @@ export class SenderService {
 
     await supabase
       .from("conversations")
-      .update({ last_activity_at: new Date().toISOString() })
+      .update({
+        last_activity_at: new Date().toISOString(),
+        last_message: content,
+      })
       .eq("id", conversationId);
   }
-
   /**
-   * Hỗ trợ upload file để lấy Attachment ID
-   * [NEW] Hàm này trả về Metadata đầy đủ (checksum, duration, etc.)
+   * Hàm mới chuyên dụng cho MediaHandler
+   * Trả về Raw Zalo Message Object để lấy msgId/cliMsgId ngay lập tức.
    */
-  public async uploadMedia(
-    type: "image" | "video" | "audio" | "file",
-    fileData: Buffer | string,
-  ) {
-    try {
-      // Lưu ý mapping type: zca-js dùng 'audio', không phải 'voice'
-      const res: any = await this.getApi().uploadAttachment(
-        type,
-        fileData as any,
-      );
-      return res;
-      /** * Result structure typically:
-       * - Audio: { url: "...", fileId: "..." }
-       * - Video: { fileId: "...", checksum: "...", duration: ... }
-       * - Image: { photoId: "...", url: "..." }
-       */
-    } catch (error) {
-      console.error("[Sender] Upload Error:", error);
-      throw error;
+  public async sendMediaDirect(
+    threadId: string,
+    content: NormalizedContent,
+    useDirectAttachment: boolean = false,
+  ): Promise<SentMessageResult> {
+    // [FIX] Return type explicit
+    const api = this.getApi();
+    const d = content.data;
+    const threadType = threadId.startsWith("g")
+      ? ThreadType.Group
+      : ThreadType.User;
+
+    console.log(`[SenderService] Sending ${content.type} to ${threadId}...`);
+
+    let rawRes: any;
+
+    switch (content.type) {
+      case "video":
+        if (!d.url) throw new Error("Missing videoUrl");
+        rawRes = await api.sendVideo(
+          {
+            videoUrl: d.url,
+            thumbnailUrl: d.thumbnail || d.url,
+            duration: d.duration || 0,
+            width: d.width || 0,
+            height: d.height || 0,
+            msg: d.caption || "",
+          },
+          threadId,
+          threadType,
+        );
+        break;
+
+      case "voice":
+      case "audio":
+        if (!d.url) throw new Error("Missing voiceUrl");
+        rawRes = await api.sendVoice(
+          {
+            voiceUrl: d.url,
+            ttl: 60000,
+          },
+          threadId,
+          threadType,
+        );
+        break;
+
+      case "image":
+        const imagePath = (d as any).filePath;
+        if (!imagePath) throw new Error("Missing image filePath");
+
+        rawRes = await api.sendMessage(
+          {
+            msg: d.caption || "",
+            attachments: [imagePath],
+          },
+          threadId,
+          threadType,
+        );
+        break;
+
+      case "file":
+        const filePath = (d as any).filePath;
+        if (!filePath) throw new Error("Missing document filePath");
+
+        rawRes = await api.sendMessage(
+          {
+            msg: d.caption || "",
+            attachments: [filePath],
+          },
+          threadId,
+          threadType,
+        );
+        break;
+
+      default:
+        throw new Error("Unsupported type for media send");
     }
+
+    // [FIX] Normalize Response
+    // ZCA-JS response structure varies by type. We need to extract msgId consistently.
+    // sendMessage returns: { message: { msgId, ... }, attachment: [...] } OR just Message object depending on version
+
+    let msgId = "";
+    let ts = Date.now();
+    let cliMsgId = "";
+
+    if (rawRes) {
+      if (rawRes.msgId) {
+        // Flat object (Video/Voice thường trả về cái này)
+        msgId = rawRes.msgId;
+        ts = rawRes.ts || ts;
+        cliMsgId = rawRes.cliMsgId;
+      } else if (rawRes.message && rawRes.message.msgId) {
+        // Nested object (sendMessage trả về cái này)
+        msgId = rawRes.message.msgId;
+        ts = rawRes.message.ts || ts;
+        cliMsgId = rawRes.message.cliMsgId;
+      }
+    }
+
+    if (!msgId) {
+      // Fallback: Nếu không lấy được ID, log warning và fake ID tạm (tránh crash)
+      console.warn(
+        "[SenderService] Cannot extract msgId from response:",
+        rawRes,
+      );
+      msgId = `unknown_${Date.now()}`;
+    }
+
+    return { msgId, ts, cliMsgId };
   }
 }

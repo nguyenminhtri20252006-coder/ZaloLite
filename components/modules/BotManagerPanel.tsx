@@ -9,8 +9,8 @@ import {
   IconCheck,
   IconClock,
   IconKey,
-} from "@/app/components/ui/Icons";
-import { Avatar } from "@/app/components/ui/Avatar";
+} from "@/components/ui/Icons";
+import { Avatar } from "@/components/ui/Avatar";
 import {
   addBotWithTokenAction,
   createPlaceholderBotAction,
@@ -22,7 +22,7 @@ import {
   stopBotSyncAction, // [NEW]
   debugBotInfoAction,
 } from "@/lib/actions/bot.actions";
-import { useZaloBotsRealtime } from "@/lib/hooks/useZaloBotsRealtime";
+import { useZaloBotsRealtime } from "@/hooks/useZaloBotsRealtime";
 import { BotDetailTabs } from "./BotDetailTabs";
 import { LoginPanel } from "./LoginPanel";
 import { BotListPanel } from "./BotListPanel";
@@ -36,7 +36,7 @@ import {
   Play,
   Pause,
 } from "lucide-react";
-import { useSSE } from "@/app/context/SSEContext";
+import { useSSE } from "@/context/SSEContext";
 
 // --- INTERNAL COMPONENTS ---
 

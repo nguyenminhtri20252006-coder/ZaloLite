@@ -7,7 +7,7 @@ import {
   setupFirstAdminAction,
   SetupState,
 } from "@/lib/actions/system.actions";
-import { IconClose, IconCheck, IconUserPlus } from "@/app/components/ui/Icons";
+import { IconClose, IconCheck, IconUserPlus } from "@/components/ui/Icons";
 
 const initialLoginState: LoginState = { error: "" };
 const initialSetupState: SetupState = { error: "", success: false };

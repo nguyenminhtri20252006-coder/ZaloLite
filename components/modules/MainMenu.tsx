@@ -4,7 +4,7 @@
 import React, { useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { Avatar } from "@/app/components/ui/Avatar";
+import { Avatar } from "@/components/ui/Avatar";
 import { staffLogoutAction } from "@/lib/actions/staff.actions";
 import {
   IconMessage,
@@ -16,7 +16,7 @@ import {
   IconDatabase,
   IconBack, // Dùng tạm icon mũi tên để biểu thị thu gọn
   IconForward, // Dùng tạm icon mũi tên để biểu thị mở rộng
-} from "@/app/components/ui/Icons";
+} from "@/components/ui/Icons";
 
 interface MainMenuProps {
   staffInfo: {

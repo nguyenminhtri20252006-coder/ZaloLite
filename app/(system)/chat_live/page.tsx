@@ -1,5 +1,5 @@
 import { getStaffSession } from "@/lib/actions/staff.actions";
-import { ChatLiveInterface } from "@/app/components/modules/ChatLiveInterface"; // New Component
+import { ChatLiveInterface } from "@/components/modules/ChatLiveInterface"; // New Component
 
 export default async function ChatLivePage() {
   const session = await getStaffSession();

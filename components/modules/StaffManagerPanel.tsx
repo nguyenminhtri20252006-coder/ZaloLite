@@ -13,14 +13,14 @@ import {
   revokeBotPermissionAction,
 } from "@/lib/actions/staff.actions";
 import { getBotsAction } from "@/lib/actions/bot.actions";
-import { Avatar } from "@/app/components/ui/Avatar";
+import { Avatar } from "@/components/ui/Avatar";
 import {
   IconUserPlus,
   IconRefresh,
   IconCog,
   IconClose,
   IconRobot,
-} from "@/app/components/ui/Icons";
+} from "@/components/ui/Icons";
 import { ZaloBot } from "@/lib/types/database.types";
 
 export function StaffManagerPanel() {

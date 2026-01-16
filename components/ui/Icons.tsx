@@ -116,4 +116,5 @@ export const Icons = {
   Download: Download,
   Play: Play,
   Pause: Pause,
+  Image: ImageIcon,
 };

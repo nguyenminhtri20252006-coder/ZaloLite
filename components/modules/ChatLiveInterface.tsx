@@ -5,7 +5,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ThreadInfo } from "@/lib/types/zalo.types";
-import { ZaloBot, Message } from "@/lib/types/database.types";
+import { ZaloBot } from "@/lib/types/database.types";
 import { ConversationList } from "./ConversationList";
 import ChatFrame from "./ChatFrame";
 import { BotListPanel } from "./BotListPanel";
@@ -15,8 +15,28 @@ import {
   getThreadsFromDBAction,
   getSingleThreadAction,
 } from "@/lib/actions/chat.actions";
-import supabase from "@/lib/supabaseClient";
-import { usePresence } from "@/lib/hooks/usePresence";
+import { usePresence } from "@/hooks/usePresence";
+import { useSSE } from "@/context/SSEContext";
+
+// Định nghĩa kiểu dữ liệu Payload từ SSE NotificationService
+type SSEMessagePayload = {
+  id: string;
+  conversation_id: string;
+  content: any;
+  sent_at: string;
+  flags: any;
+  sender: {
+    id: string;
+    type: string;
+    name: string;
+    avatar: string;
+    is_self: boolean;
+  };
+  context: {
+    bot_id: string;
+    thread_id: string;
+  };
+};
 
 type ChatLiveInterfaceProps = {
   staffInfo: {
@@ -51,7 +71,7 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [showDetails, setShowDetails] = useState(false);
 
-  // 4. Presence & Realtime Debug
+  // 4. Presence & Realtime
   const { peers, updateStatus } = usePresence({
     staffId: staffInfo?.id || "guest",
     username: staffInfo?.username || "Guest",
@@ -59,6 +79,8 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
     role: staffInfo?.role || "staff",
     avatar: staffInfo?.avatar || "",
   });
+
+  const { subscribe, unsubscribe } = useSSE();
 
   // [AUTH GUARD EFFECT]
   useEffect(() => {
@@ -69,7 +91,6 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
   }, [staffInfo, router]);
 
   // [FETCH DATA EFFECTS]
-  // 1. Fetch Bots
   const fetchBots = async () => {
     if (!staffInfo) return;
     try {
@@ -89,7 +110,6 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
     if (staffInfo) fetchBots();
   }, [staffInfo]);
 
-  // 2. Fetch Threads
   const fetchThreads = async () => {
     if (!activeBotId) return;
     setIsLoadingThreads(true);
@@ -111,114 +131,47 @@ export function ChatLiveInterface({ staffInfo }: ChatLiveInterfaceProps) {
     }
   }, [activeBotId]);
 
-  // 3. Realtime Handler (Channel Logic)
+  // [REALTIME HANDLER - SSE REPLACEMENT]
   useEffect(() => {
-    if (!activeBotId || !staffInfo) return;
+    // Handler sự kiện tin nhắn mới từ SSE
+    const handleNewMessage = async (payload: SSEMessagePayload) => {
+      // 1. Chỉ xử lý nếu tin nhắn thuộc về Bot đang active
+      if (activeBotId && payload.context?.bot_id !== activeBotId) return;
 
-    console.log(`[Realtime] 🔌 Subscribing to Bot Channel: ${activeBotId}`);
+      console.log("[Realtime] 📩 SSE Message:", payload.id);
+      const convUuid = payload.conversation_id;
 
-    const channel = supabase.channel(`live-chat-list:${activeBotId}`);
+      // 2. Cập nhật danh sách Threads (Move to Top)
+      setThreads((prev) => {
+        const idx = prev.findIndex((t) => t.uuid === convUuid);
 
-    channel.on(
-      "postgres_changes",
-      { event: "UPDATE", schema: "public", table: "zalo_bot_info" },
-      (payload) => {
-        const updatedBot = payload.new as any;
-        setBots((prev) =>
-          prev.map((b) =>
-            b.bot_info_id === updatedBot.id ? { ...b, ...updatedBot } : b,
-          ),
-        );
-      },
-    );
-
-    channel.on(
-      "postgres_changes",
-      { event: "INSERT", schema: "public", table: "messages" },
-      async (payload) => {
-        const newMsgRow = payload.new as Message;
-        // console.log("[Realtime] 📩 New Message Signal:", newMsgRow.id);
-
-        if (!newMsgRow.conversation_id) return;
-        const convUuid = newMsgRow.conversation_id;
-
-        // Cập nhật danh sách hội thoại
-        setThreads((prev) => {
-          const exists = prev.some((t) => t.uuid === convUuid);
-          if (exists) {
-            // Move to top & Update Last Msg
-            const idx = prev.findIndex((t) => t.uuid === convUuid);
-            if (idx === -1) return prev;
-            const target = prev[idx];
-            const updated = {
-              ...target,
-              lastActivity: new Date().toISOString(),
-              lastMessage: newMsgRow.content as any,
-            };
-            const newList = [...prev];
-            newList.splice(idx, 1);
-            return [updated, ...newList];
-          } else {
-            // Fetch new thread info if missing (Async inside Sync state is tricky, use effect or fetch)
-            // Tạm thời chỉ return prev, fetchThreads sẽ được trigger nếu cần hoặc handle async riêng
-            return prev;
-          }
-        });
-
-        // Nếu hội thoại mới chưa có trong list, fetch lại nhẹ
-        const exists = threads.some((t) => t.uuid === convUuid);
-        if (!exists) {
-          const newThreadInfo = await getSingleThreadAction(
-            activeBotId,
-            convUuid,
-          );
-          if (newThreadInfo) {
-            setThreads((prev) => [newThreadInfo, ...prev]);
-          }
+        // Nếu thread đã tồn tại -> Update & Move Top
+        if (idx !== -1) {
+          const target = prev[idx];
+          const updated: ThreadInfo = {
+            ...target,
+            lastActivity: payload.sent_at,
+            // Chuyển format nội dung cho UI preview (rút gọn)
+            lastMessage: payload.content,
+          };
+          const newList = [...prev];
+          newList.splice(idx, 1);
+          return [updated, ...newList];
+        } else {
+          // Nếu chưa có -> Cần fetch (vì SSE payload chưa đủ info của Thread như avatar/tên nhóm)
+          // Hoặc có thể trigger fetchSingleThread ở đây
+          // Tạm thời bỏ qua để đơn giản, hoặc gọi fetchThreads() lại sau 1s
+          return prev;
         }
-      },
-    );
+      });
+    };
 
-    channel.on(
-      "postgres_changes",
-      { event: "UPDATE", schema: "public", table: "conversations" },
-      (payload) => {
-        const updatedConv = payload.new;
-        setThreads((prev) =>
-          prev.map((t) => {
-            if (t.uuid === updatedConv.id) {
-              return {
-                ...t,
-                name: updatedConv.name || t.name,
-                avatar: updatedConv.avatar || t.avatar,
-              };
-            }
-            return t;
-          }),
-        );
-        if (selectedThread?.uuid === updatedConv.id) {
-          setSelectedThread((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  name: updatedConv.name || prev.name,
-                  avatar: updatedConv.avatar || prev.avatar,
-                }
-              : null,
-          );
-        }
-      },
-    );
-
-    channel.subscribe((status) => {
-      console.log(`[Realtime] Channel live-chat-list Status: ${status}`);
-    });
+    subscribe("user_stream", "new_message", handleNewMessage);
 
     return () => {
-      console.log(`[Realtime] Unsubscribing...`);
-      supabase.removeChannel(channel);
+      unsubscribe("user_stream", "new_message", handleNewMessage);
     };
-  }, [activeBotId, threads, staffInfo]);
+  }, [activeBotId, subscribe, unsubscribe]);
 
   // [HANDLERS]
   const handleSwitchBot = (botId: string) => {

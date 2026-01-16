@@ -403,20 +403,61 @@ export interface StandardLocation {
 }
 export type ThreadType = 0 | 1;
 
-// [FIX] Normalized Content Wrapper (Added 'location')
+export type MediaType = "image" | "video" | "audio" | "file";
+
+// Kết quả trả về sau khi Upload xong (Đã merge metadata từ Client + ID từ Zalo)
+export interface NormalizedMediaData {
+  type: MediaType;
+  url: string; // URL gốc (href)
+
+  // Zalo Specific IDs
+  fileId?: string; // Dùng cho Video/File
+  photoId?: string; // Dùng cho Image
+  voiceId?: string; // (Nếu có)
+
+  // Metadata
+  width?: number;
+  height?: number;
+  duration?: number; // milliseconds
+  fileName?: string;
+  fileSize?: number;
+  checksum?: string; // Quan trọng cho Video
+  thumbnail?: string; // URL thumbnail (nếu có)
+  caption?: string; // Lời dẫn
+}
+
+// Cập nhật NormalizedContent để dùng chung type
 export interface NormalizedContent {
-  type: "text" | "image" | "sticker" | "voice" | "video" | "file";
+  type:
+    | MediaType
+    | "text"
+    | "sticker"
+    | "link"
+    | "html"
+    | "undo"
+    | "reaction"
+    | "unknown"
+    | "voice";
   data: {
     text?: string;
+
+    // Merge các field của NormalizedMediaData vào đây
     url?: string;
-    caption?: string;
-    // Sticker fields
-    id?: string;
-    cateId?: string;
-    // File fields
+    fileId?: string;
+    photoId?: string;
+    width?: number;
+    height?: number;
+    duration?: number;
     fileName?: string;
     fileSize?: number;
-    // Generic
+    checksum?: string;
+    thumbnail?: string;
+    caption?: string;
+
+    // Sticker fields
+    stickerId?: string | number;
+    cateId?: string | number;
+
     [key: string]: any;
   };
 }

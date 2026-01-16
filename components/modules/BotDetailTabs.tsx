@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useTransition } from "react";
 import { UserX, Ban, Check, X, RefreshCw, UserPlus } from "lucide-react";
 import { ZaloUserProfile, ZaloUserResult } from "@/lib/types/zalo.types";
-import { Avatar } from "@/app/components/ui/Avatar";
+import { Avatar } from "@/components/ui/Avatar";
 import {
   IconSearch,
   IconUserPlus,
@@ -12,7 +12,7 @@ import {
   IconClose,
   IconUsers,
   IconClock,
-} from "@/app/components/ui/Icons";
+} from "@/components/ui/Icons";
 // Actions
 import {
   getBotProfileAction,

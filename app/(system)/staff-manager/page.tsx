@@ -1,5 +1,5 @@
 import { getStaffSession } from "@/lib/actions/staff.actions";
-import { StaffManagerPanel } from "@/app/components/modules/StaffManagerPanel";
+import { StaffManagerPanel } from "@/components/modules/StaffManagerPanel";
 import { redirect } from "next/navigation";
 
 export default async function StaffManagerPage() {

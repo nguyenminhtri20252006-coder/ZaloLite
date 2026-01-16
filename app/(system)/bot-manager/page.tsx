@@ -7,7 +7,7 @@
 
 import { useState, useEffect } from "react";
 import { ZaloBot, ZaloBotStatus } from "@/lib/types/database.types";
-import { BotManagerPanel } from "@/app/components/modules/BotManagerPanel";
+import { BotManagerPanel } from "@/components/modules/BotManagerPanel";
 import {
   getBotsAction,
   deleteBotAction,

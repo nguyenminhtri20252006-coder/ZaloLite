@@ -4,7 +4,7 @@
  */
 "use client";
 
-import { IconClose } from "@/app/components/ui/Icons";
+import { IconClose } from "@/components/ui/Icons";
 
 interface JsonViewerModalProps {
   isOpen: boolean;

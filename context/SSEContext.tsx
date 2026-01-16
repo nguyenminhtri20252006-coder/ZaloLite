@@ -12,7 +12,6 @@ import React, {
 type SSEEventCallback = (data: any) => void;
 
 interface SSEContextType {
-  // Subscribe vào 1 Topic cụ thể với 1 Event cụ thể
   subscribe: (
     topic: string,
     eventName: string,
@@ -37,10 +36,12 @@ export const SSEProvider = ({ children }: { children: React.ReactNode }) => {
     new Map(),
   );
 
-  // Theo dõi các topic đã báo Server (để tránh gọi API subscribe trùng lặp)
   const activeTopics = useRef<Set<string>>(new Set());
+
+  // API Call helper (Giữ nguyên logic cũ cho các module khác)
   const apiSubscribe = async (topic: string) => {
     try {
+      if (topic === "user_stream") return; // Không cần subscribe topic ảo này lên server
       await fetch("/api/sse/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -51,30 +52,39 @@ export const SSEProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
-  // 1. Khởi tạo Single Connection
+  const apiUnsubscribe = async (topic: string) => {
+    try {
+      if (topic === "user_stream") return;
+      await fetch("/api/sse/subscribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, action: "unsubscribe" }),
+      });
+    } catch (e) {
+      console.error("[SSE-Global] Unsubscribe API fail:", e);
+    }
+  };
+
   useEffect(() => {
     const connect = () => {
-      console.log("[SSE-Global] Connecting stream...");
+      console.log("[SSE-Global] 🔌 Connecting stream...");
       const es = new EventSource("/api/sse/stream");
       eventSourceRef.current = es;
 
       es.onopen = () => {
-        console.log("[SSE-Global] Connected.");
+        console.log("[SSE-Global] ✅ Connected.");
         setIsConnected(true);
-        // Resubscribe topics if reconnecting (Optional: Server might handle connection persistence, but safer to resubscribe)
         activeTopics.current.forEach((topic) => apiSubscribe(topic));
       };
 
       es.onerror = () => {
-        console.warn("[SSE-Global] Connection lost. Retrying...");
+        console.warn("[SSE-Global] ❌ Connection lost. Retrying...");
         setIsConnected(false);
         es.close();
-        // Native EventSource auto-retries, but we might want explicit control
         setTimeout(connect, 3000);
       };
 
-      // Listen to ALL events and dispatch
-      // Note: EventSource requires explicit addEventListener for named events
+      // [CRITICAL FIX] Thêm "new_message" vào danh sách supportedEvents
       const supportedEvents = [
         "qr",
         "status",
@@ -82,27 +92,28 @@ export const SSEProvider = ({ children }: { children: React.ReactNode }) => {
         "error",
         "conflict",
         "sync-log",
+        "new_message", // <--- QUAN TRỌNG: Phải có dòng này mới nhận được tin nhắn
       ];
 
       supportedEvents.forEach((evt) => {
         es.addEventListener(evt, (e: any) => {
           try {
-            const data = JSON.parse(e.data);
-            // Payload MUST contain info to identify Topic if multiple topics emit same event
-            // Tuy nhiên, mô hình SSEManager hiện tại gửi broadcast cho ID/Topic cụ thể.
-            // Client nhận được hết.
-            // Chúng ta sẽ dispatch cho TẤT CẢ listeners đăng ký sự kiện này ở TẤT CẢ topic?
-            // Không, ta cần biết sự kiện này thuộc topic nào.
-            // Nhưng SSE standard không gửi Topic Name trong header.
-            // => GIẢI PHÁP: Component callback phải tự filter data.botId hoặc data.sessionId nếu cần.
-            // Context chỉ dispatch dựa trên EventName.
+            // [DEBUG LOG] In ra mọi sự kiện nhận được để debug
+            // console.log(`[SSE-Debug] 📥 Event Received: [${evt}]`, e.data);
 
-            listeners.current.forEach((eventMap, topic) => {
+            const data = JSON.parse(e.data);
+
+            // Dispatch cho tất cả listeners đăng ký sự kiện này (bất kể topic nào)
+            // Vì Multicast gửi thẳng vào user, Client không phân biệt topic ở tầng transport
+            listeners.current.forEach((eventMap, topicKey) => {
               const callbacks = eventMap.get(evt);
-              if (callbacks) callbacks.forEach((cb) => cb(data));
+              if (callbacks) {
+                // console.log(`[SSE-Debug] Dispatching to topic: ${topicKey}, listeners: ${callbacks.size}`);
+                callbacks.forEach((cb) => cb(data));
+              }
             });
           } catch (err) {
-            console.error("[SSE-Global] Parse error:", err);
+            console.error(`[SSE-Global] Parse error for [${evt}]:`, err);
           }
         });
       });
@@ -114,20 +125,6 @@ export const SSEProvider = ({ children }: { children: React.ReactNode }) => {
       if (eventSourceRef.current) eventSourceRef.current.close();
     };
   }, []);
-
-  // API Call helper
-
-  const apiUnsubscribe = async (topic: string) => {
-    try {
-      await fetch("/api/sse/subscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, action: "unsubscribe" }),
-      });
-    } catch (e) {
-      console.error("[SSE-Global] Unsubscribe API fail:", e);
-    }
-  };
 
   const subscribe = useCallback(
     (topic: string, eventName: string, callback: SSEEventCallback) => {
@@ -141,7 +138,6 @@ export const SSEProvider = ({ children }: { children: React.ReactNode }) => {
       }
       eventMap.get(eventName)!.add(callback);
 
-      // Call API if this is the first listener for this topic
       if (!activeTopics.current.has(topic)) {
         activeTopics.current.add(topic);
         apiSubscribe(topic);
@@ -160,8 +156,6 @@ export const SSEProvider = ({ children }: { children: React.ReactNode }) => {
           if (callbacks.size === 0) eventMap.delete(eventName);
         }
 
-        // Cleanup Topic if empty
-        // Note: Logic này cần cẩn thận để không unsubscribe quá sớm nếu còn event khác
         if (eventMap.size === 0) {
           listeners.current.delete(topic);
           activeTopics.current.delete(topic);

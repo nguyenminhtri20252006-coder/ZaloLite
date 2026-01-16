@@ -11,7 +11,7 @@ import { HttpProxyAgent } from "http-proxy-agent";
 import { createClient } from "@supabase/supabase-js";
 import { sseManager } from "@/lib/core/sse-manager";
 import { SyncService } from "@/lib/core/services/sync-service";
-// [NEW] Import Event Listener
+import fs from "fs";
 import { ZaloEventListener } from "@/lib/core/listeners/zalo-event-listener";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -32,7 +32,6 @@ interface ZaloCredentials {
   zpw_enk?: string;
   session_key?: string;
 }
-
 type PendingSessionData = {
   api: API;
   credentials: ZaloCredentials;
@@ -64,6 +63,19 @@ type BotRuntime = {
 
 const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
 const INACTIVE_THRESHOLD = 10 * 60 * 1000;
+const mockImageMetadataGetter = async (filePath: string) => {
+  try {
+    const stats = await fs.promises.stat(filePath);
+    return {
+      width: 1024, // Fake
+      height: 768, // Fake
+      size: stats.size,
+      // Trong tương lai nên cài 'image-size' hoặc 'sharp' để lấy chính xác
+    };
+  } catch (e) {
+    return { width: 0, height: 0, size: 0 };
+  }
+};
 
 export class BotRuntimeManager {
   private static instance: BotRuntimeManager;
@@ -158,7 +170,8 @@ export class BotRuntimeManager {
       const zaloOptions: any = {
         selfListen: true,
         checkUpdate: false,
-        logging: false,
+        logging: true,
+        imageMetadataGetter: mockImageMetadataGetter,
       };
       if (proxyUrl) {
         try {

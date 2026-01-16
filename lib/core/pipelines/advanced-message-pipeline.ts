@@ -6,11 +6,12 @@ import { ZaloMessageParser } from "./parsers/zalo-message-parser";
 import { BotRuntimeManager } from "@/lib/core/bot-runtime-manager";
 import { ConversationService } from "@/lib/core/services/conversation-service";
 import { FriendService } from "@/lib/core/services/friend-service";
+// [NEW] Import Notification Service
+import { NotificationService } from "@/lib/core/services/notification-service";
 
 /**
- * PIPELINE V16.0 - PURE INSERT PIPELINE
- * - [REMOVED] All Undo logic (Delegated to InteractionHandler).
- * - [FOCUS] Sender Resolution -> Conv Resolution -> Message Persistence.
+ * PIPELINE V18.0 - INTEGRATED SSE DISPATCHER
+ * - Added: Call NotificationService.dispatchMessage after DB upsert.
  */
 export class AdvancedMessagePipeline {
   public async process(botId: string, rawMsg: any) {
@@ -28,9 +29,6 @@ export class AdvancedMessagePipeline {
     if (!normalized) return; // Error logged in parser
 
     // 3. [FILTER] Skip Non-Persistable Events
-    // Undo: Handled by InteractionHandler
-    // Reaction: Handled by InteractionHandler (Future)
-    // Unknown: Skip
     if (["undo", "reaction", "unknown"].includes(normalized.type)) {
       return;
     }
@@ -110,7 +108,6 @@ export class AdvancedMessagePipeline {
     }
 
     // --- C. PERSISTENCE (UPSERT) ---
-    // [CRITICAL] cliMsgId is saved in content for InteractionHandler to lookup later
     const finalContent = {
       ...normalized,
       cliMsgId: String(cliMsgId),
@@ -129,9 +126,11 @@ export class AdvancedMessagePipeline {
       flags: { status: "sent", is_undo: false },
     };
 
-    const { error } = await supabase
+    const { data: insertedMsg, error } = await supabase
       .from("messages")
-      .upsert(payload, { onConflict: "conversation_id, zalo_msg_id" });
+      .upsert(payload, { onConflict: "conversation_id, zalo_msg_id" })
+      .select()
+      .single();
 
     if (error) {
       DebugLogger.logPipeline("Error", "DB Insert Failed", error.message);
@@ -144,6 +143,12 @@ export class AdvancedMessagePipeline {
           last_message: finalContent,
         })
         .eq("id", conversationId);
+
+      // [NEW] DISPATCH NOTIFICATION (Realtime)
+      // Gửi sự kiện SSE tới Client ngay lập tức
+      if (insertedMsg) {
+        await NotificationService.dispatchMessage(botId, insertedMsg, threadId);
+      }
     }
   }
 

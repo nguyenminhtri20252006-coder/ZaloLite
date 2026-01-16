@@ -7,12 +7,12 @@ import {
   IconQrCode,
   IconKey,
   IconClose,
-} from "@/app/components/ui/Icons";
+} from "@/components/ui/Icons";
 import {
   cancelLoginAction,
   resolveLoginConflictAction,
 } from "@/lib/actions/bot.actions";
-import { useSSE } from "@/app/context/SSEContext"; // New Hook
+import { useSSE } from "@/context/SSEContext"; // New Hook
 
 interface LoginPanelProps {
   loginState: LoginState;

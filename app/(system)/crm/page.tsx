@@ -1,4 +1,4 @@
-import { IconDatabase } from "@/app/components/ui/Icons";
+import { IconDatabase } from "@/components/ui/Icons";
 
 export default function CrmPage() {
   return (

@@ -1,0 +1,172 @@
+﻿;DO NOT DELETE THIS LINE*** version=1 ***
+ánhmcr:Pé heo
+ánhname:Pé heo
+ánhnick:Pé heo
+bt:biết
+bth:bình thường
+cc:công cụ
+cisco ptr:cisco packet tracer
+cisptr:cisco packet tracer
+cl:collection
+cntt:công nghệ thông tin
+cpt:cisco packet tracer
+cs:cuộc sống
+csdlmcr:cơ sở dữ liệu
+ct:chương trình
+ctcs:chương trình chăm sóc
+cus:khách hàng
+chinguyen:chinguyen.20192006@gmail.com
+DAmcr:data analysist
+damcr:data analysist
+db:database
+dbmcr:database
+dbộ:đồng bộ
+dl:dữ liệu
+drio:draw.io
+drs:deepresearch
+ds:danh sách
+dtana:data analysist
+dtanl:data analysist
+dtanls:data analysist
+dtanlys:data analysist
+đb:đặc biệt
+đbộ:đồng bộ
+đc:được
+đg:đang
+đk:đúng không
+đkiện:điều kiện
+đồngb:đồng bộ
+đồngbộ:đồng bộ
+đpt:đa phương tiện
+đr:đúng rồi
+đt:điện thoại
+đý:đồng ý
+epf:e-porfolio
+epỏ:e-porfolio
+epor:e-porfolio
+epr:e-porfolio
+étion:extension
+fb:facebook
+femcr:font-end
+fren:font-end
+gá:google app script
+gđ:giai đoạn
+gg:google
+ggc:google calendar
+ggcl:google colab
+ggch:google chrome
+ggchr:google chrome
+ggchw:google chrome web store
+ggchws:google chrome web store
+ggd:google doc
+ggdr:google drive
+ggf:google form
+ggm:google mail
+ggme:google meet
+ggp:google photos
+ggs:google sheet
+ggwsp:google workspace
+gpmcr:giải pháp
+gip:giải pháp
+giph:giải pháp
+hcn:hình chữ nhật
+hdh:hệ điều hành
+hđ:hành động
+hođ:hoạt động
+hst:hệ sinh thái
+ht:hệ thống
+hth:hội thoại
+kb:kết bạn
+kbmcr:kết bạn
+kdmcr:kinh doanh
+ko:không
+kq:kết quả
+kt:kiểm tra
+kh:kế hoạch
+khha:khách hàng
+lg:logic
+lgf:luồng
+lợnánh:Pé heo
+ls:lịch sử
+mdb:monggoDB
+mdmcr:mark down
+mema:mermaid
+mgdb:monggoDB
+ML:machine learning
+mmaid:mermaid
+mmdmcr:mermaid
+mn:mọi người
+mng:mã nguồn
+mongo:monggoDB
+mongodb:monggoDB
+mqh:mối quan hệ
+mqhmcr:mối quan hệ
+mtd:meta data
+mvs:microsoft visual studio
+nb:notebook
+nblm:notebool LM
+nlm:notebool LM
+NM:Network Marketing
+nn:ngôn ngữ
+noteb:notebool LM
+notebLM:notebool LM
+ntn:như thế nào
+nty:như thế này
+ngd:người dùng
+ngta:người ta
+nguyenmihtri:nguyenminhtri.20252006@gmail.com
+nguyenminhtri:nguyenminhtri.20252006@gmail.com
+obs:obsidian
+obsi:obsidian
+obsidi:obsidian
+óda:obsidian
+osdi:obsidian
+pán:phương án
+pgr:postgres
+pp:phương pháp
+pth:phương thức
+phánmcr:phương án
+phwan:phương án
+phwán:phương án
+ql:quản lý
+qry:query
+rp:reponse
+rq:request
+rtmcr:real time
+sp:sản phẩm
+spb:superbase
+ss:so sánh
+sv:sever
+sx:sản xuất
+sypr:system prompt
+sýpr:system prompt
+syspr:system prompt
+tb:thông báo
+tg:thời gian
+tk:tài khoản
+tktk:tiktok
+tl:tài liệu
+tn:tính năng
+tng:tài nguyên
+tnh:tin nhắn
+tsmcr:typescript
+tt:thông tin
+th:trường hợp
+thk:thống kê
+trc:trước
+tringuyen:tringuyen.20242006@gmail.com
+trk:triển khai
+trkh:triển khai
+ủe:người dùng
+ùl:user flow
+vb:văn bản
+vdeo:video
+vdmcr:ví dụ
+vdụ:ví dụ
+víd:ví dụ
+vid:video
+vn:Việt Nam
+vsc:visual studio code
+wfl:workflow
+xh:xã hội
+xl:xử lý
